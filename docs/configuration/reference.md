@@ -24,6 +24,7 @@ work through the `begin()` context, which is the better place to do it.
 |---|---|---|---|---|
 | `cbox_telemetry.enabled` | `1` | | SYSTEM | Master switch. Off means MINIT returns immediately: no timer, no hooks, no handlers. |
 | `cbox_telemetry.profiler.enabled` | `1` | | SYSTEM | Off means no timer is created and `begin()` never profiles. |
+| `cbox_telemetry.profiler.allow_fallback_backend` | `0` | | SYSTEM | Sample even where there is no per-thread CPU timer. Off because doing so can corrupt the VM — read [known issues](../../KNOWN-ISSUES.md) first. No effect on Linux. |
 | `cbox_telemetry.profiler.period_us` | `1000` | 100 – 100000 | ALL | Sampling period in microseconds. Overridable per unit via `period_us`. |
 | `cbox_telemetry.profiler.max_depth` | `64` | 1 – 256 | ALL | Frames walked per sample. Deeper stacks get a `<truncated>` marker. Overridable per unit via `max_depth`. |
 | `cbox_telemetry.profiler.max_frames` | `4096` | 64 – 65536 | SYSTEM | Distinct functions per unit. Also sizes the arena (≈ 256 bytes each). |

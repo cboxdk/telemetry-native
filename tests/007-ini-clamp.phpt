@@ -3,6 +3,7 @@ cbox_telemetry: out-of-range configuration is clamped, never trusted
 --EXTENSIONS--
 cbox_telemetry
 --INI--
+cbox_telemetry.profiler.allow_fallback_backend=1
 cbox_telemetry.profiler.period_us=1
 cbox_telemetry.profiler.max_depth=99999
 cbox_telemetry.profiler.max_frames=1

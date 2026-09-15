@@ -8,6 +8,7 @@ if (!function_exists('proc_open')) die('skip proc_open disabled');
 if (stripos(PHP_OS_FAMILY, 'win') === 0) die('skip POSIX only');
 ?>
 --INI--
+cbox_telemetry.profiler.allow_fallback_backend=1
 cbox_telemetry.crash.enabled=1
 cbox_telemetry.crash.dir=/tmp/cbox-telemetry-test-multi
 --FILE--

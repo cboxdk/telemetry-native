@@ -723,6 +723,31 @@ static bool cbox_drain_visit(const cbox_crash_record *record, void *context)
 	add_assoc_long(&entry, "signal", (zend_long) record->signal);
 	add_assoc_string(&entry, "signal_name", cbox_signal_name(record->signal));
 	add_assoc_long(&entry, "si_code", (zend_long) record->si_code);
+
+	{
+		char address[32];
+
+		snprintf(address, sizeof(address), "0x%llx", (unsigned long long) record->fault_address);
+		add_assoc_string(&entry, "fault_address", address);
+		snprintf(address, sizeof(address), "0x%llx", (unsigned long long) record->program_counter);
+		add_assoc_string(&entry, "program_counter", address);
+		snprintf(address, sizeof(address), "0x%llx", (unsigned long long) record->module_base);
+		add_assoc_string(&entry, "module_base", address);
+
+		/*
+		 * The useful question first: was the faulting instruction inside this
+		 * extension at all? A plausible offset says yes.
+		 */
+		if (record->program_counter != 0 && record->module_base != 0
+			&& record->program_counter > record->module_base
+			&& record->program_counter - record->module_base < (16u * 1024u * 1024u)
+		) {
+			add_assoc_long(&entry, "module_offset",
+				(zend_long) (record->program_counter - record->module_base));
+		} else {
+			add_assoc_null(&entry, "module_offset");
+		}
+	}
 	add_assoc_long(&entry, "pid", (zend_long) record->pid);
 	add_assoc_long(&entry, "timestamp_ns", (zend_long) record->realtime_ns);
 	add_assoc_string(&entry, "unit", cbox_unit_type_name((cbox_unit_type) record->unit_type));
@@ -826,6 +851,8 @@ PHP_INI_BEGIN()
 		crash_enabled, zend_cbox_telemetry_globals, cbox_telemetry_globals)
 	STD_PHP_INI_ENTRY("cbox_telemetry.crash.dir", "/tmp/cbox-telemetry", PHP_INI_SYSTEM, OnUpdateString,
 		crash_dir, zend_cbox_telemetry_globals, cbox_telemetry_globals)
+	STD_PHP_INI_BOOLEAN("cbox_telemetry.profiler.allow_fallback_backend", "0", PHP_INI_SYSTEM, OnUpdateBool,
+		profiler_allow_fallback, zend_cbox_telemetry_globals, cbox_telemetry_globals)
 	STD_PHP_INI_BOOLEAN("cbox_telemetry.auto", "0", PHP_INI_SYSTEM, OnUpdateBool,
 		auto_start, zend_cbox_telemetry_globals, cbox_telemetry_globals)
 	STD_PHP_INI_ENTRY("cbox_telemetry.auto_max_ms", "60000", PHP_INI_SYSTEM, OnUpdateLong,
@@ -880,9 +907,34 @@ PHP_MINIT_FUNCTION(cbox_telemetry)
 		} else if (cbox_timer_init() != 0) {
 			CBOX_G(profiler_enabled) = false;
 			CBOX_G(profiler_reason) = "unavailable: timer could not be created";
+		} else if (!cbox_timer_is_cpu_time() && !CBOX_G(profiler_allow_fallback)) {
+			/*
+			 * The fallback backend is not safe to sample with, and saying so is
+			 * better than shipping a profiler that occasionally takes the
+			 * process with it.
+			 *
+			 * Interrupting the VM from the sampler thread corrupts it: over 20
+			 * suite runs each, 2 crashes with the cross-thread interrupt store,
+			 * 0 with the profiler off, 0 with the profiler running and only
+			 * that store removed. Delivering a signal to the PHP thread with
+			 * pthread_kill instead was worse — 13 crashes over 40 runs —
+			 * because it can land the thread anywhere, while the Linux backend
+			 * fires only while that thread is executing PHP.
+			 *
+			 * Linux is unaffected: it has a per-thread CPU-time timer and none
+			 * of this applies. See KNOWN-ISSUES.md.
+			 */
+			cbox_timer_shutdown();
+			CBOX_G(profiler_enabled) = false;
+			CBOX_G(profiler_reason) =
+				"disabled: no per-thread CPU timer on this platform, and sampling "
+				"through the fallback backend can corrupt the VM "
+				"(cbox_telemetry.profiler.allow_fallback_backend=1 to override)";
 		} else {
 			cbox_profiler_install();
-			CBOX_G(profiler_reason) = "ready";
+			CBOX_G(profiler_reason) = cbox_timer_is_cpu_time()
+				? "ready"
+				: "ready: fallback backend, explicitly allowed — see KNOWN-ISSUES.md";
 		}
 	} else {
 		CBOX_G(profiler_reason) = "disabled by configuration";

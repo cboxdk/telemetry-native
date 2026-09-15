@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <dlfcn.h>
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -50,6 +51,7 @@ static const cbox_op_state   *cbox_crash_ops = NULL;
 static struct sigaction cbox_crash_previous[CBOX_CRASH_SIGNALS];
 static bool             cbox_crash_installed = false;
 static cbox_crash_status cbox_crash_current_status = CBOX_CRASH_OFF;
+static uint64_t          cbox_crash_module_base = 0;
 static char             cbox_crash_path[CBOX_CRASH_PATH_MAX];
 static char             cbox_crash_dir[CBOX_CRASH_PATH_MAX];
 static pid_t            cbox_crash_sink_pid = 0;
@@ -75,6 +77,52 @@ static void cbox_crash_write_all(int fd, const char *bytes, size_t len)
 	}
 }
 
+/*
+ * The faulting instruction pointer out of the signal's machine context.
+ * Signal-safe: it is a field read from a structure the kernel already handed
+ * us. Returns 0 where the layout is unknown rather than guessing.
+ */
+static uint64_t cbox_crash_program_counter(void *context)
+{
+	if (context == NULL) {
+		return 0;
+	}
+
+#if defined(__APPLE__)
+	{
+		const ucontext_t *uc = (const ucontext_t *) context;
+
+		if (uc->uc_mcontext == NULL) {
+			return 0;
+		}
+
+# if defined(__aarch64__) || defined(__arm64__)
+		return (uint64_t) uc->uc_mcontext->__ss.__pc;
+# elif defined(__x86_64__)
+		return (uint64_t) uc->uc_mcontext->__ss.__rip;
+# else
+		return 0;
+# endif
+	}
+#elif defined(__linux__)
+	{
+		const ucontext_t *uc = (const ucontext_t *) context;
+
+# if defined(__aarch64__)
+		return (uint64_t) uc->uc_mcontext.pc;
+# elif defined(__x86_64__)
+		return (uint64_t) uc->uc_mcontext.gregs[REG_RIP];
+# else
+		return 0;
+# endif
+	}
+#else
+	(void) context;
+
+	return 0;
+#endif
+}
+
 static void cbox_crash_handler(int sig, siginfo_t *info, void *context)
 {
 	cbox_crash_record *record = &cbox_crash_record_buffer;
@@ -90,6 +138,9 @@ static void cbox_crash_handler(int sig, siginfo_t *info, void *context)
 	if (cbox_crash_fd >= 0) {
 		record->signal = (uint32_t) sig;
 		record->si_code = info != NULL ? (int32_t) info->si_code : 0;
+		record->fault_address = info != NULL ? (uint64_t) (uintptr_t) info->si_addr : 0;
+		record->program_counter = cbox_crash_program_counter(context);
+		record->module_base = cbox_crash_module_base;
 		record->pid = (uint32_t) getpid();
 		record->realtime_ns = cbox_realtime_ns();
 		record->monotonic_ns = cbox_now_ns();
@@ -288,6 +339,18 @@ cbox_crash_status cbox_crash_install(
 	 */
 	strcpy(cbox_crash_dir, dir);
 	cbox_crash_path[0] = '\0';
+
+	/*
+	 * Where this shared object is mapped. dladdr() is not signal-safe, so it is
+	 * resolved here, once, and only read from the handler.
+	 */
+	{
+		Dl_info info;
+
+		if (dladdr((void *) (uintptr_t) &cbox_crash_install, &info) != 0 && info.dli_fbase != NULL) {
+			cbox_crash_module_base = (uint64_t) (uintptr_t) info.dli_fbase;
+		}
+	}
 
 	memset(&cbox_crash_record_buffer, 0, sizeof(cbox_crash_record_buffer));
 	cbox_crash_record_buffer.magic = CBOX_CRASH_MAGIC;

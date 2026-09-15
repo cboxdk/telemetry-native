@@ -118,7 +118,14 @@ otherwise. This is the main reason the default is 1 ms.
 
 The wall-clock fallback backend defers heavily by construction — it keeps
 counting while the process is descheduled, so a sample can be attributed long
-after the time it represents. Another reason it is a development backend.
+after the time it represents.
+
+It is also **off by default**, because sampling through it can corrupt the VM:
+interrupting the engine from a separate thread is not safe, and the platform
+offers nothing as narrow as Linux's per-thread CPU timer. Everything else on
+that platform — operation timing, counters, breadcrumbs, the crash recorder —
+works normally. See [known issues](../../KNOWN-ISSUES.md) before overriding it
+with `cbox_telemetry.profiler.allow_fallback_backend`.
 
 ### Attribution of internal calls moves between PHP versions
 

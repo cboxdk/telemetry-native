@@ -8,6 +8,7 @@ if (!extension_loaded('Zend OPcache')) die('skip opcache not available');
 if (!function_exists('opcache_get_status')) die('skip opcache_get_status unavailable');
 ?>
 --INI--
+cbox_telemetry.profiler.allow_fallback_backend=1
 cbox_telemetry.profiler.period_us=200
 opcache.enable=1
 opcache.enable_cli=1

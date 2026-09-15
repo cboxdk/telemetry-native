@@ -21,7 +21,7 @@
 #include "unit.h"
 
 #define CBOX_CRASH_MAGIC          0x43425843u /* 'CBXC' */
-#define CBOX_CRASH_FORMAT_VERSION 1u
+#define CBOX_CRASH_FORMAT_VERSION 2u
 #define CBOX_CRASH_CRUMBS         32u
 /*
  * One sink per process, named for its pid. Two reasons, both learned the hard
@@ -65,6 +65,22 @@ typedef struct _cbox_crash_record {
 
 	uint64_t unit_start_ns;
 	uint64_t current_op_start_ns;
+
+	/*
+	 * Where it actually went wrong.
+	 *
+	 * si_addr is the address the faulting access touched; program_counter is
+	 * the instruction that touched it, read from the signal's machine context.
+	 * module_base is where this extension is mapped, captured outside signal
+	 * context — subtract it from the PC and a non-trivial offset says the fault
+	 * was ours, while a wild one says it was somebody else's code.
+	 *
+	 * All three are diagnostics, not telemetry. They exist to answer "whose
+	 * instruction was it" without a core dump.
+	 */
+	uint64_t fault_address;
+	uint64_t program_counter;
+	uint64_t module_base;
 
 	cbox_crumb crumbs[CBOX_CRASH_CRUMBS];
 } cbox_crash_record;

@@ -3,6 +3,7 @@ cbox_telemetry: automatic instrumentation opens a unit before any caller does
 --EXTENSIONS--
 cbox_telemetry
 --INI--
+cbox_telemetry.profiler.allow_fallback_backend=1
 cbox_telemetry.auto=1
 cbox_telemetry.profiler.period_us=200
 --FILE--

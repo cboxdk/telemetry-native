@@ -162,7 +162,7 @@ it a good citizen, but "should" is not "tested".
 |---|---|
 | PHP | 8.3, 8.4, 8.5 |
 | Linux | x86_64 and arm64, glibc and musl — the production target |
-| macOS | arm64, development only: wall-clock sampling, not CPU time |
+| macOS | arm64, development only. Profiling is off by default there — see [KNOWN-ISSUES.md](KNOWN-ISSUES.md); everything else works |
 | Windows | out of scope |
 | ZTS | not supported; the code stays TSRM-clean for when it is |
 

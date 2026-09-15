@@ -3,6 +3,7 @@ cbox_telemetry: state does not bleed between units in a long-lived worker
 --EXTENSIONS--
 cbox_telemetry
 --INI--
+cbox_telemetry.profiler.allow_fallback_backend=1
 cbox_telemetry.profiler.period_us=200
 --FILE--
 <?php

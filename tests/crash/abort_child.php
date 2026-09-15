@@ -22,7 +22,16 @@ if (extension_loaded('pdo_sqlite')) {
 echo "ready\n";
 flush();
 
-// The parent signals us here. Bounded so a failed test cannot hang CI.
-sleep(30);
+/*
+ * Wait to be killed. Looped rather than one long sleep: while a unit is being
+ * profiled the sampler interrupts blocking calls, and PHP's sleep() returns
+ * early when a signal arrives, so a single sleep(30) ends almost immediately.
+ * Bounded so a failed test cannot hang CI.
+ */
+$deadline = time() + 30;
+
+while (time() < $deadline) {
+    sleep(1);
+}
 
 echo "not reached\n";

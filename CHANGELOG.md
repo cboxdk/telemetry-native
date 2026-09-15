@@ -42,6 +42,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cbox_telemetry_status`, `cbox_telemetry_begin`, `cbox_telemetry_finish`,
   `cbox_telemetry_drain_crashes`.
 
+### Platform safety
+
+- **Profiling is disabled by default where there is no per-thread CPU timer**
+  (in practice macOS). Interrupting the VM from a sampler thread corrupts it:
+  2 crash records over 20 suite runs with the cross-thread interrupt store,
+  0 with the profiler off, 0 with the profiler running and only that store
+  removed. A captured record pinned the fault to a NULL `zend_execute_data`
+  dereferenced at its `func` field, inside the PHP binary rather than this
+  extension. Delivering the interrupt by `pthread_kill` instead was worse
+  (13 records over 40 runs), because it can land the thread anywhere, while
+  Linux's CPU-time timer fires only while that thread executes PHP.
+  `cbox_telemetry_status()` reports the reason, and
+  `profiler.allow_fallback_backend=1` overrides it. Linux is unaffected, and
+  everything other than sampling keeps working everywhere.
+
 ### Fixed after review
 
 - **Two closures in one file were one frame.** Frame identity was name plus

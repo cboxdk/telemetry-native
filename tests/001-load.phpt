@@ -2,6 +2,8 @@
 cbox_telemetry: loads and reports a coherent status
 --EXTENSIONS--
 cbox_telemetry
+--INI--
+cbox_telemetry.profiler.allow_fallback_backend=1
 --FILE--
 <?php
 $status = cbox_telemetry_status();

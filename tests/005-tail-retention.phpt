@@ -2,6 +2,8 @@
 cbox_telemetry: a profile is only materialised when it is asked for
 --EXTENSIONS--
 cbox_telemetry
+--INI--
+cbox_telemetry.profiler.allow_fallback_backend=1
 --FILE--
 <?php
 function cbox_work(): void

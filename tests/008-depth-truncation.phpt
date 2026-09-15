@@ -3,6 +3,7 @@ cbox_telemetry: stacks deeper than max_depth are marked, not silently cut
 --EXTENSIONS--
 cbox_telemetry
 --INI--
+cbox_telemetry.profiler.allow_fallback_backend=1
 cbox_telemetry.profiler.period_us=200
 cbox_telemetry.profiler.max_depth=8
 --FILE--

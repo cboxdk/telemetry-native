@@ -5,6 +5,7 @@ cbox_telemetry
 --SKIPIF--
 <?php if (!extension_loaded('pcntl')) die('skip ext-pcntl not available'); ?>
 --INI--
+cbox_telemetry.profiler.allow_fallback_backend=1
 cbox_telemetry.profiler.period_us=200
 --FILE--
 <?php

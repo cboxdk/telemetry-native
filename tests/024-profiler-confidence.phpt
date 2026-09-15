@@ -3,6 +3,7 @@ cbox_telemetry: a profile says how much of it was sampled late
 --EXTENSIONS--
 cbox_telemetry
 --INI--
+cbox_telemetry.profiler.allow_fallback_backend=1
 cbox_telemetry.profiler.period_us=1000
 --FILE--
 <?php

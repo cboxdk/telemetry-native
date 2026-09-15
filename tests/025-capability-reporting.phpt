@@ -8,6 +8,7 @@ if (extension_loaded('redis')) die('skip needs ext-redis absent to show the gap'
 if (!extension_loaded('pdo_sqlite')) die('skip pdo_sqlite not available');
 ?>
 --INI--
+cbox_telemetry.profiler.allow_fallback_backend=1
 cbox_telemetry.hooks.pdo=1
 cbox_telemetry.hooks.redis=1
 cbox_telemetry.hooks.curl=0

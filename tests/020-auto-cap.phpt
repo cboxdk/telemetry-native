@@ -3,6 +3,7 @@ cbox_telemetry: an automatic unit nobody closes stops sampling instead of runnin
 --EXTENSIONS--
 cbox_telemetry
 --INI--
+cbox_telemetry.profiler.allow_fallback_backend=1
 cbox_telemetry.auto=1
 cbox_telemetry.profiler.period_us=100
 cbox_telemetry.auto_max_ms=1000

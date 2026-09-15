@@ -5,6 +5,7 @@ cbox_telemetry
 --SKIPIF--
 <?php if (!extension_loaded('pdo_sqlite')) die('skip pdo_sqlite not available'); ?>
 --INI--
+cbox_telemetry.profiler.allow_fallback_backend=1
 cbox_telemetry.hooks.pdo=1
 --FILE--
 <?php

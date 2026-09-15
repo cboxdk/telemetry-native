@@ -5,6 +5,7 @@ cbox_telemetry
 --SKIPIF--
 <?php if (!extension_loaded('curl')) die('skip ext-curl not available'); ?>
 --INI--
+cbox_telemetry.profiler.allow_fallback_backend=1
 cbox_telemetry.hooks.curl=1
 --FILE--
 <?php

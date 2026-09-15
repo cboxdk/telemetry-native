@@ -3,6 +3,7 @@ cbox_telemetry: samples land in the function that burns the CPU
 --EXTENSIONS--
 cbox_telemetry
 --INI--
+cbox_telemetry.profiler.allow_fallback_backend=1
 cbox_telemetry.profiler.period_us=200
 --FILE--
 <?php

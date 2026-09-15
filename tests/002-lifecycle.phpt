@@ -2,6 +2,8 @@
 cbox_telemetry: begin/finish lifecycle, unknown handles and re-entry
 --EXTENSIONS--
 cbox_telemetry
+--INI--
+cbox_telemetry.profiler.allow_fallback_backend=1
 --FILE--
 <?php
 $handle = cbox_telemetry_begin(['unit' => 'queue']);

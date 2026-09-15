@@ -55,6 +55,7 @@ ZEND_BEGIN_MODULE_GLOBALS(cbox_telemetry)
 	char     *crash_dir;
 	bool      auto_start;
 	zend_long auto_max_ms;
+	bool      profiler_allow_fallback;
 
 	/* Runtime */
 	cbox_unit_state unit;
