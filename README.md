@@ -100,21 +100,43 @@ allocation, no Zend API, no PHP callbacks, no locks.
 
 ## Measured overhead
 
-On PHP 8.4/Linux, against the same build without the extension. Note that the
-containerised environment these were taken in has a noise floor of roughly ±4%,
-so treat everything below it as "not measurable here" rather than as a precise
-figure — the numbers that mattered were far outside it (see
-[decision 0001](docs/decisions/0001-operation-hook-mechanism.md)).
+Under concurrent PHP-FPM load on the Cbox production image
+(`ghcr.io/cboxdk/php-baseimages/php-fpm-nginx`), 8 workers on 4 CPUs, a request
+that does CPU work, opens a PDO connection and runs 200 queries. CPU time is
+read from the container's cgroup; scenarios are interleaved across rounds and
+reported as medians.
 
-| mode | cpu | calls | deep | internal | mixed |
-|---|---|---|---|---|---|
-| loaded, never called | -3.0% | 3.8% | 1.3% | -3.2% | -1.5% |
-| operation hooks armed | 4.6% | 5.8% | 0.6% | -0.5% | -2.8% |
-| begin/finish per unit | 0.3% | 1.6% | 0.0% | -2.1% | -1.9% |
-| profiling at 1 ms | 2.4% | 4.9% | -1.9% | 1.4% | 3.5% |
-| everything on | 1.7% | 5.2% | 2.0% | 0.3% | -1.8% |
+| | CPU per request | vs baseline | p95 | worker RSS |
+|---|---|---|---|---|
+| baseline, no extension | 2.249 ms | — | 10 ms | 30,065 KB |
+| loaded, never called | 2.238 ms | −0.5% | 9 ms | 30,348 KB |
+| operation hooks armed | 2.279 ms | +1.3% | 9 ms | 30,396 KB |
+| **profiling every request at 1 ms** | 2.336 ms | **+3.9%** | 10 ms | 30,459 KB |
+| profiling every request at 200 µs | 2.414 ms | +7.3% | 10 ms | 30,512 KB |
 
-Reproduce with `php benchmarks/run.php modules/cbox_telemetry.so 21 1000`.
+Read it honestly: having the extension loaded costs nothing measurable, and
+profiling *every* request at 1 ms costs about 4% CPU — a little above the 3%
+this set out to hit. Profiling only sampled requests costs proportionally less,
+and that is the intended deployment.
+
+The 200 µs row is the interesting one. It costs nearly twice as much and buys
+nothing: at that period the kernel cannot deliver, and `timer_overruns` reports
+1,194 of 1,492 ticks skipped. Faster is not more accurate, which is why the
+default is 1 ms.
+
+Memory is flat under sustained load — +8 KB per worker across 60 seconds at
+concurrency 8.
+
+```bash
+benchmarks/fpm/load.sh 4000 8 8.4 3 60
+```
+
+Two measurement mistakes are recorded in that script's comments, because both
+produced confident nonsense: requests-per-second is noisy enough to rank
+"loaded but never called" as *slower* than "loaded and hooking", and summing
+per-worker CPU from `/proc` goes backwards when FPM recycles workers. Running
+scenarios in sequence rather than interleaved made the extension look 8.5% more
+expensive than baseline purely by being measured later.
 
 ## Tested alongside
 

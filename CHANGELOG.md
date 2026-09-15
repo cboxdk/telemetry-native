@@ -83,6 +83,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   installed versus unavailable per group, `hooks_installed` names the functions
   actually wrapped, and `profiler_status` says why profiling is degraded rather
   than only that it is off.
+- **Load and soak harness on the production image**
+  (`benchmarks/fpm/load.sh`), measuring CPU per request from the container
+  cgroup under concurrent PHP-FPM. Loaded-but-uncalled is unmeasurable;
+  profiling every request at 1 ms costs ~3.9% CPU; memory is flat under
+  sustained load.
 - **End-to-end benchmarks** that include `finish()`, measured separately for
   retained and discarded profiles, plus a long-running worker memory benchmark.
 
