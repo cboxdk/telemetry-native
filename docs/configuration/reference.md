@@ -88,6 +88,15 @@ That is worth surfacing in whatever diagnostics the consumer offers.
 `cbox_telemetry_status()` returns both `hook_detail` (what the INI enabled) and
 `hooks` (the summary), which is enough to notice the mismatch and say so.
 
+## PHP-FPM
+
+The crash directory is created by the first worker to serve a request, not by
+the master, so it belongs to the pool user rather than root. One consequence:
+**give each pool its own `cbox_telemetry.crash.dir`** when pools run as
+different users. The first pool to start owns the directory, and others will
+report `unavailable: directory` in `cbox_telemetry_status()` — truthfully, but
+they will record nothing.
+
 ## Sizing memory
 
 The dominant cost is the arena, at roughly `max_frames × 256` bytes — about 1 MB

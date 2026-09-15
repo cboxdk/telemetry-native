@@ -81,6 +81,44 @@ re-raised explicitly.
 If another handler was installed before ours, it is chained rather than
 replaced.
 
+## One sink per process
+
+Each process writes its own file, `crash-<pid>.bin`, opened on its first
+request rather than at module startup. Both halves of that matter.
+
+**Per process, because draining a shared file is not safe.** Compacting one
+file means truncating it, and anything appended between the last read and the
+truncate is gone. The handler cannot take a lock to close that window — locking
+is not async-signal-safe — so the window cannot be closed, only avoided. A
+drain therefore only touches files whose owning process is gone: a dead process
+appends nothing, so its file can be read whole and removed. Live processes'
+sinks are skipped entirely, because unlinking one would leave its owner writing
+into a file with no name and lose the very crash it was there to catch.
+
+**On first request, because of PHP-FPM.** The master starts as root and runs
+module startup; workers then drop to another user. A sink created at startup
+belongs to root with mode 0700, and every worker is locked out of it for the
+life of the pool — the recorder reports `unavailable: directory` and records
+nothing. Opening on the first request means the file belongs to whoever
+actually writes it. `tests/fpm/run.sh` exercises exactly this against a real
+FPM master with a non-root pool.
+
+The consequence for multi-pool setups: the first pool to serve a request owns
+the directory, and pools running as a different user will report
+`unavailable: directory`. Give each pool its own `cbox_telemetry.crash.dir`.
+
+## Consistency of a crash snapshot
+
+A crash lands in the middle of whatever the process was doing, including
+writing a breadcrumb. Entries are therefore published with their sequence
+number written last: a slot being written reads as sequence zero and is
+skipped, and an entry whose sequence changes while it is being copied is
+dropped. A record contains only breadcrumbs that were complete.
+
+There is no retry loop. This runs in a signal handler after something has
+already gone wrong, and spinning there would be a worse failure than one
+missing breadcrumb.
+
 ## Draining
 
 Records outlive the process that wrote them. Another process reads them later:

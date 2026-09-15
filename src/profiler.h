@@ -51,7 +51,46 @@ bool cbox_profiler_running(void);
 
 uint64_t cbox_profiler_period_ns(void);
 uint64_t cbox_profiler_sample_count(void);
+/*
+ * Sampling events that could not be represented — one per lost sample, however
+ * many internal limits it ran into on the way. The capacity counters below are
+ * diagnostics for *why*, and deliberately do not sum with it.
+ */
 uint64_t cbox_profiler_dropped(void);
+uint32_t cbox_profiler_frame_capacity_hits(void);
+uint32_t cbox_profiler_node_capacity_hits(void);
+
+/*
+ * How much of a profile landed where the sample says it did.
+ *
+ * Two different things can make a sample arrive late, and they mean opposite
+ * things to whoever reads the profile, so they are counted separately:
+ *
+ *   deferred   The timer fired and the VM had not reached a safe point since
+ *              the last one — PHP was inside a long internal call. The samples
+ *              are attributed when control returns, so they name the call that
+ *              blocked rather than where time went inside it. High values mean
+ *              "trust the leaf less"; they are real signal about native work.
+ *
+ *   overruns   The kernel could not deliver at the requested period at all and
+ *              told us how many it skipped. Nothing was observed for those.
+ *              High values mean the period is finer than this platform can do,
+ *              and the honest response is to sample less often.
+ *
+ * Folding these together would be worse than not counting: one says the
+ * application is in native code, the other says the configuration is wrong.
+ */
+uint64_t cbox_profiler_deferred_samples(void);
+uint64_t cbox_profiler_deferred_events(void);
+uint32_t cbox_profiler_max_deferred(void);
+uint64_t cbox_profiler_timer_overruns(void);
+
+/*
+ * Forget process-local state after a fork. POSIX timers are not inherited by
+ * the child, and neither are threads, so a forked process holds state claiming
+ * a timer that does not exist.
+ */
+void cbox_profiler_after_fork(void);
 bool     cbox_profiler_capped(void);
 size_t   cbox_profiler_arena_peak(void);
 

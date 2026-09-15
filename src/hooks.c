@@ -26,6 +26,19 @@ static uint32_t  cbox_hook_count = 0;
 static bool      cbox_hooks_done = false;
 static char      cbox_hook_summary[128];
 
+enum { CBOX_GROUP_PDO = 0, CBOX_GROUP_REDIS, CBOX_GROUP_CURL, CBOX_GROUP_STREAMS, CBOX_GROUP_MAX };
+
+static cbox_hook_group cbox_hook_groups[CBOX_GROUP_MAX] = {
+	{"pdo", false, 0, 0},
+	{"redis", false, 0, 0},
+	{"curl", false, 0, 0},
+	{"streams", false, 0, 0},
+};
+
+/* "PDO::__construct", "curl_exec", … in installation order. */
+static char     cbox_hook_names[CBOX_HOOK_MAX][64];
+static uint32_t cbox_hook_names_count = 0;
+
 /*
  * A zend_bailout (fatal error, timeout, exit) longjmps straight past the end
  * of the wrapper, so an operation that dies mid-call never records its end.
@@ -90,7 +103,7 @@ static zend_function *cbox_find_function(const char *class_name, const char *fun
 	return func;
 }
 
-static void cbox_hook_add(const char *class_name, const char *function_name, cbox_op_type op)
+static void cbox_hook_add(int group, const char *class_name, const char *function_name, cbox_op_type op)
 {
 	zend_function *target;
 	cbox_hook *hook;
@@ -103,14 +116,18 @@ static void cbox_hook_add(const char *class_name, const char *function_name, cbo
 
 	/*
 	 * Missing is normal, not an error: ext-redis may not be installed, and PDO
-	 * spells its connection entry point differently across versions.
+	 * spells its connection entry point differently across versions. It is
+	 * still recorded, because "asked for but not present" and "asked for and
+	 * working" look identical from the outside otherwise.
 	 */
 	if (target == NULL || target->type != ZEND_INTERNAL_FUNCTION) {
+		cbox_hook_groups[group].missing++;
 		return;
 	}
 
 	/* Somebody else got there first (another APM, Xdebug). Leave theirs alone. */
 	if (target->internal_function.handler == NULL) {
+		cbox_hook_groups[group].missing++;
 		return;
 	}
 
@@ -124,6 +141,20 @@ static void cbox_hook_add(const char *class_name, const char *function_name, cbo
 
 	target->internal_function.handler = cbox_hook_handlers[cbox_hook_count];
 	cbox_hook_count++;
+
+	cbox_hook_groups[group].installed++;
+
+	if (cbox_hook_names_count < CBOX_HOOK_MAX) {
+		if (class_name != NULL) {
+			snprintf(cbox_hook_names[cbox_hook_names_count], sizeof(cbox_hook_names[0]),
+				"%s::%s", class_name, function_name);
+		} else {
+			snprintf(cbox_hook_names[cbox_hook_names_count], sizeof(cbox_hook_names[0]),
+				"%s", function_name);
+		}
+
+		cbox_hook_names_count++;
+	}
 }
 
 static void cbox_hooks_build_summary(bool pdo, bool redis, bool curl, bool streams)
@@ -160,25 +191,47 @@ void cbox_hooks_install(bool pdo, bool redis, bool curl, bool streams)
 	cbox_hooks_done = true;
 	cbox_hooks_build_summary(pdo, redis, curl, streams);
 
+	cbox_hook_groups[CBOX_GROUP_PDO].requested = pdo;
+	cbox_hook_groups[CBOX_GROUP_REDIS].requested = redis;
+	cbox_hook_groups[CBOX_GROUP_CURL].requested = curl;
+	cbox_hook_groups[CBOX_GROUP_STREAMS].requested = streams;
+
 	if (pdo) {
-		cbox_hook_add("PDO", "__construct", CBOX_OP_PDO_CONNECT);
+		cbox_hook_add(CBOX_GROUP_PDO, "PDO", "__construct", CBOX_OP_PDO_CONNECT);
 		/* PHP 8.4 added PDO::connect() as a second way in. */
-		cbox_hook_add("PDO", "connect", CBOX_OP_PDO_CONNECT);
+		cbox_hook_add(CBOX_GROUP_PDO, "PDO", "connect", CBOX_OP_PDO_CONNECT);
 	}
 
 	if (redis) {
-		cbox_hook_add("Redis", "connect", CBOX_OP_REDIS_CONNECT);
-		cbox_hook_add("Redis", "pconnect", CBOX_OP_REDIS_PCONNECT);
+		cbox_hook_add(CBOX_GROUP_REDIS, "Redis", "connect", CBOX_OP_REDIS_CONNECT);
+		cbox_hook_add(CBOX_GROUP_REDIS, "Redis", "pconnect", CBOX_OP_REDIS_PCONNECT);
 	}
 
 	if (curl) {
-		cbox_hook_add(NULL, "curl_exec", CBOX_OP_CURL_EXEC);
+		cbox_hook_add(CBOX_GROUP_CURL, NULL, "curl_exec", CBOX_OP_CURL_EXEC);
 	}
 
 	if (streams) {
-		cbox_hook_add(NULL, "stream_socket_client", CBOX_OP_STREAM_CONNECT);
-		cbox_hook_add(NULL, "fsockopen", CBOX_OP_STREAM_CONNECT);
+		cbox_hook_add(CBOX_GROUP_STREAMS, NULL, "stream_socket_client", CBOX_OP_STREAM_CONNECT);
+		cbox_hook_add(CBOX_GROUP_STREAMS, NULL, "fsockopen", CBOX_OP_STREAM_CONNECT);
 	}
+}
+
+const cbox_hook_group *cbox_hooks_groups(uint32_t *count)
+{
+	*count = CBOX_GROUP_MAX;
+
+	return cbox_hook_groups;
+}
+
+uint32_t cbox_hooks_installed_count(void)
+{
+	return cbox_hook_names_count;
+}
+
+const char *cbox_hooks_installed_name(uint32_t index)
+{
+	return index < cbox_hook_names_count ? cbox_hook_names[index] : NULL;
 }
 
 void cbox_hooks_uninstall(void)

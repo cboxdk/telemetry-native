@@ -47,9 +47,16 @@ php -r 'print_r(cbox_telemetry_status());'
 [timer_backend] => posix-thread-cputime
 [timer_cpu_time] => 1
 [timer_signal] => 38
+[profiler_status] => ready
 [hooks] => pdo,redis,curl
+[hooks_installed] => Array([0] => PDO::__construct, [1] => PDO::connect, [2] => curl_exec)
+[hook_detail] => Array(
+    [pdo]   => Array([requested] => 1, [installed] => 2, [unavailable] => 0, [active] => 1)
+    [redis] => Array([requested] => 1, [installed] => 0, [unavailable] => 2, [active] => )
+    …
+)
 [crash_recorder] => armed
-[crash_path] => /tmp/cbox-telemetry/crashes.bin
+[crash_path] => /tmp/cbox-telemetry/crash-4711.bin
 ```
 
 What to look for:
@@ -61,9 +68,14 @@ What to look for:
 - **`crash_recorder`** — `armed`, or a reason it is not: `unavailable: directory`
   (the crash directory is missing, not a directory, or not owned by this user),
   `unavailable: sink`, `unavailable: handler`, or `off` if you disabled it.
-- **`hooks`** — which operation hooks are enabled, not which ones found a target.
-  `redis` appearing here when `ext-redis` is not installed is expected; the hook
-  simply has nothing to attach to.
+- **`hook_detail`** — the one to read. `requested` is configuration; `installed`
+  is how many functions were actually wrapped. The example above says Redis
+  hooks were asked for and found nothing, which is the answer to "why are there
+  no `redis.connect` timings" — `ext-redis` is not installed. `hooks` alone
+  cannot tell you that, because it only echoes the INI.
+- **`profiler_status`** — `ready`, `disabled by configuration`, or why it is
+  degraded (`unavailable: timer could not be created`). `profiler_enabled=false`
+  on its own does not say whether that was a choice or a failure.
 
 ## Troubleshooting
 

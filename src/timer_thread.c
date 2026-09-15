@@ -39,8 +39,25 @@ static pthread_cond_t  cbox_timer_wake = PTHREAD_COND_INITIALIZER;
 static bool     cbox_timer_installed = false;
 static bool     cbox_timer_started = false;
 static bool     cbox_timer_stopping = false;
-static bool     cbox_timer_is_armed = false;
 static uint64_t cbox_timer_period_ns = 0;
+
+/*
+ * Read by the sampler thread after it wakes, written by the request thread when
+ * a unit starts or ends. A plain bool touched from two threads is a data race
+ * and therefore undefined behaviour, however benign it looks — the compiler is
+ * entitled to assume it cannot change and hoist the check out of the loop.
+ */
+static volatile bool cbox_timer_is_armed = false;
+
+static inline bool cbox_timer_armed_load(void)
+{
+	return __atomic_load_n(&cbox_timer_is_armed, __ATOMIC_ACQUIRE);
+}
+
+static inline void cbox_timer_armed_store(bool value)
+{
+	__atomic_store_n(&cbox_timer_is_armed, value, __ATOMIC_RELEASE);
+}
 
 static void cbox_timer_sleep(uint64_t nanoseconds)
 {
@@ -64,7 +81,7 @@ static void *cbox_timer_main(void *ignored)
 
 		pthread_mutex_lock(&cbox_timer_lock);
 
-		while (!cbox_timer_is_armed && !cbox_timer_stopping) {
+		while (!cbox_timer_armed_load() && !cbox_timer_stopping) {
 			pthread_cond_wait(&cbox_timer_wake, &cbox_timer_lock);
 		}
 
@@ -83,7 +100,7 @@ static void *cbox_timer_main(void *ignored)
 		 * finished while we were asleep, and a tick after that would be
 		 * attributed to whatever runs next.
 		 */
-		if (cbox_timer_is_armed) {
+		if (cbox_timer_armed_load()) {
 			cbox_profiler_tick(1);
 		}
 	}
@@ -130,7 +147,7 @@ void cbox_timer_shutdown(void)
 
 	pthread_mutex_lock(&cbox_timer_lock);
 	cbox_timer_stopping = true;
-	cbox_timer_is_armed = false;
+	cbox_timer_armed_store(false);
 	pthread_cond_signal(&cbox_timer_wake);
 	pthread_mutex_unlock(&cbox_timer_lock);
 
@@ -151,7 +168,7 @@ int cbox_timer_arm(uint64_t period_ns)
 
 	pthread_mutex_lock(&cbox_timer_lock);
 	cbox_timer_period_ns = period_ns;
-	cbox_timer_is_armed = true;
+	cbox_timer_armed_store(true);
 	pthread_cond_signal(&cbox_timer_wake);
 	pthread_mutex_unlock(&cbox_timer_lock);
 
@@ -161,13 +178,35 @@ int cbox_timer_arm(uint64_t period_ns)
 void cbox_timer_disarm(void)
 {
 	pthread_mutex_lock(&cbox_timer_lock);
-	cbox_timer_is_armed = false;
+	cbox_timer_armed_store(false);
 	pthread_mutex_unlock(&cbox_timer_lock);
 }
 
 bool cbox_timer_armed(void)
 {
-	return cbox_timer_is_armed;
+	return cbox_timer_armed_load();
+}
+
+void cbox_timer_after_fork(void)
+{
+	/*
+	 * The sampler thread did not come across the fork. Whatever the mutex and
+	 * condition variable looked like at that instant is frozen in the child —
+	 * possibly locked by a thread that does not exist — so they are
+	 * reinitialised rather than reused. The child is single-threaded here, so
+	 * this is the one safe moment to do it.
+	 */
+	pthread_mutex_init(&cbox_timer_lock, NULL);
+	pthread_cond_init(&cbox_timer_wake, NULL);
+
+	cbox_timer_started = false;
+	cbox_timer_installed = false;
+	cbox_timer_stopping = false;
+	cbox_timer_armed_store(false);
+	cbox_timer_period_ns = 0;
+
+	/* Start a fresh sampler thread for this process. */
+	cbox_timer_init();
 }
 
 const char *cbox_timer_backend(void)

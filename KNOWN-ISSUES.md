@@ -24,6 +24,14 @@ The extension's own crash recorder captured one: `SIGSEGV`, `si_code=2`
 microseconds into an ordinary unit of work, with breadcrumbs showing nothing
 unusual before it.
 
+### Since first recorded
+
+A data race in the macOS timer backend has been fixed (the armed flag was read
+by the sampler thread outside the mutex guarding its writes). A hammered run
+afterwards showed 1 signal death in 25 suite runs, against 3 in 25 before.
+That is a small sample either side and the two overlap, so it is a direction,
+not a conclusion — the issue stays open.
+
 ### What it is not
 
 Ruled out by measurement, not by argument:

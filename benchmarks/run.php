@@ -49,6 +49,10 @@ $modes = [
     'profile+hooks' => [array_merge($load, $hooksOn), 'profile'],
 ];
 
+// Window includes begin()/finish(), so materialisation is counted.
+$modes['e2e discard'] = [array_merge($load, $hooksOff), 'e2e_discard'];
+$modes['e2e retain'] = [array_merge($load, $hooksOff), 'e2e_retain'];
+
 if ($hasExcimer) {
     $modes['excimer'] = [['-d', 'extension=excimer.so'], 'excimer'];
 }

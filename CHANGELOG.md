@@ -40,6 +40,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cbox_telemetry_status`, `cbox_telemetry_begin`, `cbox_telemetry_finish`,
   `cbox_telemetry_drain_crashes`.
 
+### Fixed after review
+
+- **Two closures in one file were one frame.** Frame identity was name plus
+  file; before PHP 8.4 every closure in a file is called `{closure}`, so their
+  samples were all reported against whichever was seen first. Identity now
+  includes the declaration line.
+- **A forked child profiled nothing while reporting that it was.** POSIX
+  per-thread timers are not inherited across `fork()`, and neither are threads,
+  but the copied state said otherwise. The extension now notices the pid change
+  and rebuilds the timer, the sampler thread, the inherited unit and the crash
+  sink descriptor.
+- **The crash recorder was silently dead under standard PHP-FPM.** The sink was
+  created during module startup, which runs in the root master, leaving a
+  root-owned directory no worker could write. Sinks are now opened per process
+  on the first request, under the identity that writes them. Covered by
+  `tests/fpm/run.sh` against a real FPM master with a non-root pool.
+- **Draining could lose a crash record.** Compacting a shared file meant
+  truncating it, and anything appended between the last read and the truncate
+  was gone — a window the handler cannot close, because locking is not
+  async-signal-safe. Each process now has its own sink and a drain only
+  consumes files whose owner has exited.
+- **A crash could capture a half-written breadcrumb.** Entries are now
+  published with their sequence number last, so a slot being written is skipped
+  rather than reported as a mixture of two operations.
+- **One lost sample could count as several drops.** `profiler.dropped` is now
+  exactly "sampling events that could not be represented"; the capacity
+  counters that explain why are reported separately.
+- **The macOS timer had a data race.** The armed flag was read by the sampler
+  thread outside the mutex that guarded its writes. Now atomic.
+
+### Added after review
+
+- **Profiler confidence.** `deferred_samples`, `deferred_events`,
+  `max_deferred` and `timer_overruns`, on the profile and in the counters.
+  Deferred means the VM was in a long internal call; overruns mean the kernel
+  could not deliver at the requested period and nothing was observed at all.
+  They are counted separately because one is a fact about the application and
+  the other about the configuration. At 200 µs on Linux, 1,194 of 1,492 ticks
+  turn out to be overruns — previously invisible.
+- **Truthful capability reporting.** `hook_detail` reports requested versus
+  installed versus unavailable per group, `hooks_installed` names the functions
+  actually wrapped, and `profiler_status` says why profiling is degraded rather
+  than only that it is off.
+- **End-to-end benchmarks** that include `finish()`, measured separately for
+  retained and discarded profiles, plus a long-running worker memory benchmark.
+
 ### Notes on what the testing changed
 
 - **Operation hooks swap internal handlers rather than registering a Zend

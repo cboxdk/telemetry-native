@@ -68,7 +68,7 @@ void cbox_frames_reset(cbox_frame_table *table)
 		table->count = 0;
 	}
 
-	table->dropped = 0;
+	table->capacity_hits = 0;
 }
 
 uint32_t cbox_frames_intern(
@@ -99,6 +99,14 @@ uint32_t cbox_frames_intern(
 		hash = cbox_fnv1a(file, file_len, hash);
 	}
 
+	/*
+	 * The declaration line is part of identity, not decoration. Before PHP 8.4
+	 * every closure in a file is called "{closure}", so name+file alone folds
+	 * all of them into one frame and reports their samples against whichever
+	 * happened to be seen first.
+	 */
+	hash = cbox_fnv1a((const char *) &line, sizeof(line), hash);
+
 	slot = hash & table->bucket_mask;
 
 	while (table->buckets[slot] != 0) {
@@ -106,6 +114,7 @@ uint32_t cbox_frames_intern(
 		frame = &table->frames[id];
 
 		if (frame->hash == hash
+			&& frame->line == line
 			&& frame->name_len == name_len
 			&& memcmp(cbox_arena_at(arena, frame->name_off), name, name_len) == 0
 			&& frame->file_len == file_len
@@ -119,7 +128,7 @@ uint32_t cbox_frames_intern(
 	}
 
 	if (table->count >= table->capacity) {
-		table->dropped++;
+		table->capacity_hits++;
 		return CBOX_FRAME_NONE;
 	}
 
@@ -128,7 +137,7 @@ uint32_t cbox_frames_intern(
 	frame->name_off = cbox_arena_put(arena, name, name_len);
 
 	if (frame->name_off == CBOX_ARENA_NONE) {
-		table->dropped++;
+		table->capacity_hits++;
 		return CBOX_FRAME_NONE;
 	}
 
@@ -137,7 +146,7 @@ uint32_t cbox_frames_intern(
 		: CBOX_ARENA_NONE;
 
 	if (file_len > 0 && frame->file_off == CBOX_ARENA_NONE) {
-		table->dropped++;
+		table->capacity_hits++;
 		return CBOX_FRAME_NONE;
 	}
 

@@ -75,8 +75,15 @@ void cbox_crumbs_push(
 
 	entry = &ring->entries[ring->head];
 
+	/*
+	 * Retract the slot before touching it. A crash between here and the
+	 * publish below finds sequence zero and skips the entry rather than
+	 * reporting a mixture of this operation and the one that used the slot
+	 * before it.
+	 */
+	__atomic_store_n(&entry->seq, 0u, __ATOMIC_RELEASE);
+
 	entry->ts_ns = now_ns;
-	entry->seq = ++ring->seq;
 	entry->type = (uint8_t) type;
 	entry->flags = flags;
 	entry->label_len = (uint16_t) label_len;
@@ -89,17 +96,23 @@ void cbox_crumbs_push(
 		memset(entry->label + label_len, 0, CBOX_CRUMB_LABEL_MAX - label_len);
 	}
 
-	ring->head = (ring->head + 1) & ring->mask;
+	/* Publish. Everything above is visible to a reader that sees this. */
+	__atomic_store_n(&entry->seq, ++ring->seq, __ATOMIC_RELEASE);
+
+	__atomic_store_n(&ring->head, (ring->head + 1) & ring->mask, __ATOMIC_RELEASE);
 	ring->written++;
 }
 
 uint32_t cbox_crumbs_snapshot(const cbox_crumb_ring *ring, cbox_crumb *dst, uint32_t max)
 {
-	uint32_t available, count, i, index;
+	uint32_t available, count, i, index, copied = 0;
+	uint32_t head;
 
 	if (ring->entries == NULL || dst == NULL || max == 0) {
 		return 0;
 	}
+
+	head = __atomic_load_n(&ring->head, __ATOMIC_ACQUIRE);
 
 	available = ring->written > (uint64_t) ring->capacity
 		? ring->capacity
@@ -109,9 +122,33 @@ uint32_t cbox_crumbs_snapshot(const cbox_crumb_ring *ring, cbox_crumb *dst, uint
 
 	for (i = 0; i < count; i++) {
 		/* head - count + i, wrapped: oldest of the retained window first. */
-		index = (ring->head + ring->capacity - count + i) & ring->mask;
-		dst[i] = ring->entries[index];
+		const cbox_crumb *entry;
+		uint32_t before, after;
+
+		index = (head + ring->capacity - count + i) & ring->mask;
+		entry = &ring->entries[index];
+
+		before = __atomic_load_n(&entry->seq, __ATOMIC_ACQUIRE);
+
+		if (before == 0) {
+			continue; /* being written right now — incomplete, so not reported */
+		}
+
+		dst[copied] = *entry;
+
+		after = __atomic_load_n(&entry->seq, __ATOMIC_ACQUIRE);
+
+		/*
+		 * Changed underneath us. No retry: this runs in a signal handler after
+		 * something has already gone wrong, and an unbounded loop there is a
+		 * worse failure than one missing breadcrumb.
+		 */
+		if (after != before) {
+			continue;
+		}
+
+		copied++;
 	}
 
-	return count;
+	return copied;
 }

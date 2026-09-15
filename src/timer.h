@@ -34,6 +34,16 @@ int  cbox_timer_arm(uint64_t period_ns);
 void cbox_timer_disarm(void);
 bool cbox_timer_armed(void);
 
+/*
+ * Re-establish the timer in a forked child.
+ *
+ * Neither backend survives fork(): POSIX per-thread timers are explicitly not
+ * inherited, and neither are threads. The child wakes up holding state that
+ * says a timer exists when none does, and would sample nothing forever while
+ * reporting that profiling is on.
+ */
+void cbox_timer_after_fork(void);
+
 const char *cbox_timer_backend(void);
 
 /* Which signal this backend delivers on — reported by status() for diagnostics. */

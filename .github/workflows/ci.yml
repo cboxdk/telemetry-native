@@ -35,7 +35,8 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-          extensions: pdo_sqlite, curl, opcache
+          # pcntl so the fork-safety test runs rather than skipping.
+          extensions: pdo_sqlite, curl, opcache, pcntl
           coverage: none
           tools: none
 
@@ -82,6 +83,25 @@ jobs:
           ./configure --enable-cbox-telemetry
           make -j4
           NO_INTERACTION=1 REPORT_EXIT_STATUS=1 make test TESTS=tests
+
+  fpm:
+    name: "php-fpm privilege separation · php ${{ matrix.php }}"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    container: php:${{ matrix.php }}-fpm
+
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.3', '8.4', '8.5']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The crash recorder's lifecycle only breaks where the master runs as
+      # root and the workers do not, which no unit test can reproduce.
+      - name: Crash recorder under a real FPM master and non-root pool
+        run: sh tests/fpm/run.sh
 
   memory:
     name: "valgrind"

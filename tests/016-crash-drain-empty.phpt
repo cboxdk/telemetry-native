@@ -14,9 +14,10 @@ var_dump(cbox_telemetry_drain_crashes(-1));
 
 $status = cbox_telemetry_status();
 var_dump($status['crash_recorder']);
-var_dump(str_ends_with((string) $status['crash_path'], '/crashes.bin'));
+// One sink per process, named for its pid.
+var_dump((string) $status['crash_path'] === '/tmp/cbox-telemetry-drain-empty/crash-' . getmypid() . '.bin');
 
-@unlink('/tmp/cbox-telemetry-drain-empty/crashes.bin');
+@array_map('unlink', glob('/tmp/cbox-telemetry-drain-empty/*') ?: []);
 @rmdir('/tmp/cbox-telemetry-drain-empty');
 ?>
 --EXPECT--

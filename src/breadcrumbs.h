@@ -11,6 +11,13 @@
  *
  * Never store arguments, SQL, URLs, keys or any other application value here.
  * Labels are function and operation names only.
+ *
+ * Entries are published with a sequence number written last. A crash can land
+ * in the middle of writing one — the signal interrupts the very thread doing
+ * the writing — and a snapshot taken then would otherwise copy a half-built
+ * entry with one field from this operation and the rest from whatever occupied
+ * the slot before. An entry mid-write reads as sequence zero and is skipped,
+ * so a crash record contains only entries that were complete.
  */
 #ifndef CBOX_BREADCRUMBS_H
 #define CBOX_BREADCRUMBS_H
@@ -32,7 +39,7 @@ typedef enum _cbox_crumb_type {
 
 typedef struct _cbox_crumb {
 	uint64_t ts_ns;
-	uint32_t seq;
+	uint32_t seq; /* 0 while the entry is being written; published last */
 	uint8_t  type;
 	uint8_t  flags;
 	uint16_t label_len;

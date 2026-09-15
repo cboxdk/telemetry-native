@@ -79,7 +79,7 @@ void cbox_stacktree_reset(cbox_stack_tree *tree)
 	}
 
 	cbox_stacktree_seed_root(tree);
-	tree->dropped = 0;
+	tree->capacity_hits = 0;
 	tree->total = 0;
 }
 
@@ -105,6 +105,7 @@ uint32_t cbox_stacktree_child(cbox_stack_tree *tree, uint32_t parent, uint32_t f
 	}
 
 	if (tree->count >= tree->capacity) {
+		tree->capacity_hits++;
 		return CBOX_NODE_NONE;
 	}
 

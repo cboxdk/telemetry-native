@@ -24,6 +24,13 @@
  */
 static volatile uint32_t cbox_pending_ticks = 0;
 
+/*
+ * Counted alongside the ticks: how many times the handler actually ran. The
+ * difference between the two is what the kernel skipped, and the count itself
+ * is how often the VM failed to come back between deliveries.
+ */
+static volatile uint32_t cbox_pending_deliveries = 0;
+
 static struct {
 	cbox_arena       arena;
 	cbox_frame_table frames;
@@ -32,6 +39,10 @@ static struct {
 	uint64_t period_ns;
 	uint64_t samples;
 	uint64_t dropped;
+	uint64_t deferred;
+	uint64_t deferred_events;
+	uint64_t timer_overruns;
+	uint32_t max_deferred;
 	uint64_t deadline_ns; /* 0 = no limit */
 	uint32_t max_depth;
 	uint32_t truncated_frame;
@@ -49,6 +60,7 @@ static void (*cbox_previous_interrupt)(zend_execute_data *execute_data) = NULL;
 void cbox_profiler_tick(uint32_t ticks)
 {
 	CBOX_ATOMIC_ADD(&cbox_pending_ticks, ticks == 0 ? 1 : ticks);
+	CBOX_ATOMIC_ADD(&cbox_pending_deliveries, 1);
 	zend_atomic_bool_store(&EG(vm_interrupt), 1);
 }
 
@@ -227,8 +239,35 @@ static void cbox_profiler_collect(uint32_t weight)
 static void cbox_profiler_interrupt(zend_execute_data *execute_data)
 {
 	uint32_t pending = CBOX_ATOMIC_TAKE(&cbox_pending_ticks);
+	uint32_t deliveries = CBOX_ATOMIC_TAKE(&cbox_pending_deliveries);
 
 	if (pending > 0 && cbox_profiler.running && cbox_profiler.ready) {
+		/*
+		 * Ticks the kernel counted but never delivered. Nothing was observed
+		 * for these — they say the requested period is finer than the platform
+		 * manages, not anything about the application.
+		 */
+		if (pending > deliveries) {
+			cbox_profiler.timer_overruns += pending - deliveries;
+		}
+
+		/*
+		 * More than one delivery since the last safe point means the VM was
+		 * somewhere it could not be interrupted — a long internal call. Those
+		 * samples are real, but they are booked here rather than where they
+		 * were taken.
+		 */
+		if (deliveries > 1) {
+			uint32_t late = deliveries - 1;
+
+			cbox_profiler.deferred += late;
+			cbox_profiler.deferred_events++;
+
+			if (late > cbox_profiler.max_deferred) {
+				cbox_profiler.max_deferred = late;
+			}
+		}
+
 		cbox_profiler_collect(pending);
 
 		/*
@@ -362,6 +401,7 @@ void cbox_profiler_stop(void)
 
 	/* Anything the timer queued but the VM never got to is not a sample. */
 	CBOX_ATOMIC_TAKE(&cbox_pending_ticks);
+	CBOX_ATOMIC_TAKE(&cbox_pending_deliveries);
 }
 
 void cbox_profiler_reset(void)
@@ -376,6 +416,10 @@ void cbox_profiler_reset(void)
 
 	cbox_profiler.samples = 0;
 	cbox_profiler.dropped = 0;
+	cbox_profiler.deferred = 0;
+	cbox_profiler.deferred_events = 0;
+	cbox_profiler.timer_overruns = 0;
+	cbox_profiler.max_deferred = 0;
 	cbox_profiler.truncated_frame = CBOX_FRAME_NONE;
 	cbox_profiler.capped = false;
 }
@@ -397,7 +441,50 @@ uint64_t cbox_profiler_sample_count(void)
 
 uint64_t cbox_profiler_dropped(void)
 {
-	return cbox_profiler.dropped + cbox_profiler.tree.dropped + cbox_profiler.frames.dropped;
+	return cbox_profiler.dropped;
+}
+
+uint32_t cbox_profiler_frame_capacity_hits(void)
+{
+	return cbox_profiler.frames.capacity_hits;
+}
+
+uint32_t cbox_profiler_node_capacity_hits(void)
+{
+	return cbox_profiler.tree.capacity_hits;
+}
+
+uint64_t cbox_profiler_deferred_samples(void)
+{
+	return cbox_profiler.deferred;
+}
+
+uint64_t cbox_profiler_deferred_events(void)
+{
+	return cbox_profiler.deferred_events;
+}
+
+uint32_t cbox_profiler_max_deferred(void)
+{
+	return cbox_profiler.max_deferred;
+}
+
+uint64_t cbox_profiler_timer_overruns(void)
+{
+	return cbox_profiler.timer_overruns;
+}
+
+void cbox_profiler_after_fork(void)
+{
+	/*
+	 * The child inherited our memory but not our timer, so "running" is a lie
+	 * it would otherwise keep believing. Drop the claim and clear any ticks
+	 * that were pending in the parent at the moment of the fork.
+	 */
+	cbox_profiler.running = false;
+	CBOX_ATOMIC_TAKE(&cbox_pending_ticks);
+	CBOX_ATOMIC_TAKE(&cbox_pending_deliveries);
+	cbox_profiler_reset();
 }
 
 bool cbox_profiler_capped(void)

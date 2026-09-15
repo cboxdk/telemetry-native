@@ -23,7 +23,23 @@
 #define CBOX_CRASH_MAGIC          0x43425843u /* 'CBXC' */
 #define CBOX_CRASH_FORMAT_VERSION 1u
 #define CBOX_CRASH_CRUMBS         32u
-#define CBOX_CRASH_FILENAME       "crashes.bin"
+/*
+ * One sink per process, named for its pid. Two reasons, both learned the hard
+ * way:
+ *
+ *  - A single shared file has to be compacted when it is drained, and
+ *    truncating a file that other processes are still appending to loses
+ *    whatever arrived between the last read and the truncate. The crash
+ *    handler cannot take a lock to close that window — locking is not
+ *    async-signal-safe — so the window cannot be closed, only avoided.
+ *
+ *  - Under PHP-FPM the master starts as one user and workers run as another.
+ *    A sink created during module startup belongs to the master, and a worker
+ *    cannot reopen it to drain. Opening per process, on first request, means
+ *    the file belongs to whoever actually writes it.
+ */
+#define CBOX_CRASH_FILE_PREFIX    "crash-"
+#define CBOX_CRASH_FILE_SUFFIX    ".bin"
 
 typedef struct _cbox_crash_record {
 	uint32_t magic;
@@ -71,6 +87,13 @@ cbox_crash_status cbox_crash_install(
 	const cbox_unit_state  *unit,
 	const cbox_op_state    *ops
 );
+
+/*
+ * Open this process's sink, creating the directory if needed. Idempotent, and
+ * cheap to call every request: it only acts when the pid has changed, which is
+ * exactly once per worker after a fork.
+ */
+void cbox_crash_open_sink(void);
 
 void cbox_crash_uninstall(void);
 

@@ -31,7 +31,7 @@ typedef struct _cbox_stack_tree {
 	uint32_t  *buckets; /* open addressing; 0 = empty, else node_id + 1 */
 	uint32_t   bucket_mask;
 
-	uint32_t   dropped; /* samples that could not be placed */
+	uint32_t   capacity_hits; /* times a node could not be created */
 	uint64_t   total;   /* samples successfully recorded */
 } cbox_stack_tree;
 

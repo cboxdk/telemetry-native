@@ -58,6 +58,26 @@ Operations are only aggregated while a unit of work is active. A worker sitting
 idle between jobs opening a connection records a breadcrumb but no aggregate —
 otherwise the numbers would belong to no unit and accumulate forever.
 
+## Where the list stops, and why
+
+`mysqli`, native PostgreSQL, Memcached, MongoDB and every other client are
+deliberately absent, and adding them on request would be the wrong instinct.
+
+A native hook earns its place only at a **high-value opaque boundary**: a call
+where userland genuinely cannot measure as well, and where the answer matters.
+Connection establishment qualifies — the time goes into DNS, TCP, TLS and
+authentication, none of which PHP can see and none of which a sampler catches.
+`curl_exec` qualifies because plenty of code bypasses the framework's HTTP
+client entirely.
+
+Query execution does not qualify: Laravel already times queries accurately from
+events, and a native hook would add overhead to duplicate it less well. Neither
+does anything a userland wrapper can bracket just as precisely.
+
+The test is not "can we hook it" — we can hook almost anything — but "does
+hooking it tell you something userland could not". Answering yes too often is
+how a bounded extension turns into an APM agent.
+
 ## Known limits
 
 **A fatal error mid-call loses that measurement.** `zend_bailout` longjmps past

@@ -88,7 +88,7 @@ var_dump($record['breadcrumbs'][0]['label'] ?? null);
 // Draining consumes: a second drain finds nothing.
 var_dump(cbox_telemetry_drain_crashes());
 
-@unlink($dir . '/crashes.bin');
+@array_map('unlink', glob($dir . '/*') ?: []);
 ?>
 --EXPECT--
 bool(true)

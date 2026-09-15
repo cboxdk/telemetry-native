@@ -83,6 +83,11 @@ memory as a 30-millisecond one and resetting between jobs is a pointer store.
 unit; if the caller decides afterwards that it was too fast to be interesting,
 the native state is reset and no PHP array is ever allocated.
 
+**A profile says how much to trust it.** Samples that could not be taken at a
+safe point, and ticks the kernel never delivered, are counted separately and
+reported with the profile — so a consumer can tell "94% of this was sampled
+directly" from "most of this is arithmetic because the period is too fine".
+
 **Everything is bounded.** Frames, call-tree nodes, breadcrumbs, the arena and
 the operation nesting stack all have hard ceilings. Past them the extension
 increments a dropped counter and carries on. It never grows, never blocks and
@@ -110,6 +115,24 @@ figure — the numbers that mattered were far outside it (see
 | everything on | 1.7% | 5.2% | 2.0% | 0.3% | -1.8% |
 
 Reproduce with `php benchmarks/run.php modules/cbox_telemetry.so 21 1000`.
+
+## Tested alongside
+
+Native extensions share signals, handlers and the function table, so
+coexistence is verified rather than assumed:
+
+| | result |
+|---|---|
+| Xdebug (develop, trace) | works; samples rise because Xdebug slows execution |
+| OPcache, including tracing JIT | works |
+| Excimer profiling simultaneously | works — different signals, both collect |
+| PHP-FPM, root master + non-root pool | works; `tests/fpm/run.sh` |
+
+Commercial agents (Datadog, New Relic, Tideways) are **not** in that list. They
+need licences and live accounts, so nothing here has been verified against them
+and this documentation will not pretend otherwise. The extension restores a
+handler only when it is still its own, which is the behaviour that should make
+it a good citizen, but "should" is not "tested".
 
 ## Support
 

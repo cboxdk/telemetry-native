@@ -133,6 +133,16 @@ static void cbox_profile_into(zval *profile, bool include_stacks)
 	add_assoc_string(profile, "clock", cbox_timer_is_cpu_time() ? "cpu" : "wall");
 	add_assoc_long(profile, "dropped", (zend_long) cbox_profiler_dropped());
 
+	/*
+	 * Carried on the profile itself, not just in counters: anyone rendering
+	 * this needs to know how much of it was booked late without having to
+	 * correlate two structures.
+	 */
+	add_assoc_long(profile, "deferred_samples", (zend_long) cbox_profiler_deferred_samples());
+	add_assoc_long(profile, "deferred_events", (zend_long) cbox_profiler_deferred_events());
+	add_assoc_long(profile, "max_deferred", (zend_long) cbox_profiler_max_deferred());
+	add_assoc_long(profile, "timer_overruns", (zend_long) cbox_profiler_timer_overruns());
+
 	/* Frames are emitted once and referenced by id — never repeated per sample. */
 	array_init_size(&frame_list, frames->count);
 
@@ -240,6 +250,47 @@ static cbox_unit_type cbox_unit_type_for_sapi(void)
 	}
 
 	return CBOX_UNIT_HTTP;
+}
+
+/*
+ * Detect that we are running in a forked child and rebuild whatever did not
+ * survive.
+ *
+ * pcntl_fork() copies this extension's memory wholesale, including the flags
+ * saying a POSIX timer exists and a sampler thread is running. Neither is
+ * true in the child: POSIX says per-thread timers are not inherited, and
+ * threads are not either. Without this, a forked worker reports profiling as
+ * active and collects nothing, forever.
+ *
+ * A pid check rather than pthread_atfork: it needs no registration, cannot be
+ * bypassed by a fork we did not see, and the only places that care are the
+ * ones that call it.
+ */
+static void cbox_detect_fork(void)
+{
+	pid_t current = getpid();
+
+	if (CBOX_G(owner_pid) == current) {
+		return;
+	}
+
+	CBOX_G(owner_pid) = current;
+
+	if (!CBOX_G(active)) {
+		return;
+	}
+
+	cbox_profiler_after_fork();
+	cbox_timer_after_fork();
+
+	/* The inherited unit belongs to the parent's work, not ours. */
+	cbox_unit_reset(&CBOX_G(unit));
+	cbox_ops_reset(&CBOX_G(ops));
+
+	/* And the inherited sink descriptor still points at the parent's file. */
+	if (CBOX_G(crash_enabled)) {
+		cbox_crash_open_sink();
+	}
 }
 
 /* ----------------------------------------------------------- unit lifecycle */
@@ -370,6 +421,8 @@ PHP_FUNCTION(cbox_telemetry_status)
 
 	add_assoc_string(return_value, "hooks", cbox_hooks_active());
 	add_assoc_bool(return_value, "hooks_armed", CBOX_G(hooks_armed));
+	add_assoc_string(return_value, "profiler_status",
+		CBOX_G(profiler_reason) != NULL ? CBOX_G(profiler_reason) : "unknown");
 
 	add_assoc_string(return_value, "crash_recorder", cbox_crash_state_name(cbox_crash_state()));
 
@@ -396,12 +449,45 @@ PHP_FUNCTION(cbox_telemetry_status)
 	add_assoc_long(&limits, "auto_max_ms", CBOX_G(auto_max_ms));
 	add_assoc_zval(return_value, "limits", &limits);
 
-	array_init(&hooks);
-	add_assoc_bool(&hooks, "pdo", CBOX_G(hook_pdo));
-	add_assoc_bool(&hooks, "redis", CBOX_G(hook_redis));
-	add_assoc_bool(&hooks, "curl", CBOX_G(hook_curl));
-	add_assoc_bool(&hooks, "streams", CBOX_G(hook_streams));
-	add_assoc_zval(return_value, "hook_detail", &hooks);
+	/*
+	 * Requested is configuration; installed is reality. They differ whenever an
+	 * extension is not present — "redis enabled, nothing hooked" is the answer
+	 * to "why are there no redis.connect timings", and it is not one the INI
+	 * alone can give.
+	 */
+	{
+		uint32_t group_count = 0;
+		uint32_t index;
+		const cbox_hook_group *groups = cbox_hooks_groups(&group_count);
+		zval installed;
+
+		array_init(&hooks);
+
+		for (index = 0; index < group_count; index++) {
+			zval entry;
+
+			array_init_size(&entry, 4);
+			add_assoc_bool(&entry, "requested", groups[index].requested);
+			add_assoc_long(&entry, "installed", (zend_long) groups[index].installed);
+			add_assoc_long(&entry, "unavailable", (zend_long) groups[index].missing);
+			add_assoc_bool(&entry, "active", groups[index].installed > 0);
+			add_assoc_zval(&hooks, groups[index].label, &entry);
+		}
+
+		add_assoc_zval(return_value, "hook_detail", &hooks);
+
+		array_init(&installed);
+
+		for (index = 0; index < cbox_hooks_installed_count(); index++) {
+			const char *name = cbox_hooks_installed_name(index);
+
+			if (name != NULL) {
+				add_next_index_string(&installed, name);
+			}
+		}
+
+		add_assoc_zval(return_value, "hooks_installed", &installed);
+	}
 }
 
 PHP_FUNCTION(cbox_telemetry_begin)
@@ -424,6 +510,8 @@ PHP_FUNCTION(cbox_telemetry_begin)
 	if (!CBOX_G(active) || !CBOX_G(enabled)) {
 		RETURN_LONG(0);
 	}
+
+	cbox_detect_fork();
 
 	if (context != NULL) {
 		if ((value = zend_hash_str_find(context, "unit", sizeof("unit") - 1)) != NULL
@@ -574,6 +662,13 @@ PHP_FUNCTION(cbox_telemetry_finish)
 	array_init(&counters);
 	add_assoc_long(&counters, "profiler.samples", (zend_long) cbox_profiler_sample_count());
 	add_assoc_long(&counters, "profiler.dropped", (zend_long) cbox_profiler_dropped());
+	add_assoc_long(&counters, "profiler.deferred_samples",
+		(zend_long) cbox_profiler_deferred_samples());
+	add_assoc_long(&counters, "profiler.deferred_events",
+		(zend_long) cbox_profiler_deferred_events());
+	add_assoc_long(&counters, "profiler.max_deferred", (zend_long) cbox_profiler_max_deferred());
+	add_assoc_long(&counters, "profiler.timer_overruns",
+		(zend_long) cbox_profiler_timer_overruns());
 	add_assoc_long(&counters, "profiler.period_ns", (zend_long) cbox_profiler_period_ns());
 	add_assoc_long(&counters, "gc.runs",
 		(zend_long) (gc_runs - CBOX_G(gc_runs_at_begin)));
@@ -582,6 +677,10 @@ PHP_FUNCTION(cbox_telemetry_finish)
 	add_assoc_long(&counters, "ops.overflow", (zend_long) ops->overflow);
 	add_assoc_long(&counters, "breadcrumbs.written", (zend_long) CBOX_G(crumbs).written);
 	add_assoc_long(&counters, "arena.peak_bytes", (zend_long) cbox_profiler_arena_peak());
+	add_assoc_long(&counters, "profiler.frame_capacity_hits",
+		(zend_long) cbox_profiler_frame_capacity_hits());
+	add_assoc_long(&counters, "profiler.node_capacity_hits",
+		(zend_long) cbox_profiler_node_capacity_hits());
 	add_assoc_bool(&counters, "profiler.capped", cbox_profiler_capped());
 	add_assoc_long(&counters, "profiler.frames", (zend_long) cbox_profiler_frames()->count);
 	add_assoc_long(&counters, "profiler.nodes", (zend_long) cbox_profiler_tree()->count);
@@ -775,12 +874,18 @@ PHP_MINIT_FUNCTION(cbox_telemetry)
 				(uint32_t) CBOX_G(max_frames),
 				(uint32_t) CBOX_G(max_nodes),
 				arena_bytes) != 0
-			|| cbox_timer_init() != 0
 		) {
 			CBOX_G(profiler_enabled) = false;
+			CBOX_G(profiler_reason) = "unavailable: could not allocate profile storage";
+		} else if (cbox_timer_init() != 0) {
+			CBOX_G(profiler_enabled) = false;
+			CBOX_G(profiler_reason) = "unavailable: timer could not be created";
 		} else {
 			cbox_profiler_install();
+			CBOX_G(profiler_reason) = "ready";
 		}
+	} else {
+		CBOX_G(profiler_reason) = "disabled by configuration";
 	}
 
 	CBOX_G(hooks_armed) = CBOX_G(hook_pdo) || CBOX_G(hook_redis)
@@ -796,6 +901,7 @@ PHP_MINIT_FUNCTION(cbox_telemetry)
 	}
 
 	CBOX_G(active) = true;
+	CBOX_G(owner_pid) = getpid();
 
 	return SUCCESS;
 }
@@ -814,6 +920,16 @@ PHP_RINIT_FUNCTION(cbox_telemetry)
 			CBOX_G(hook_curl),
 			CBOX_G(hook_streams)
 		);
+	}
+
+	/*
+	 * Also the first point running as the worker after an FPM fork, so it is
+	 * where the sink gets opened under the identity that will write it.
+	 */
+	cbox_detect_fork();
+
+	if (CBOX_G(active) && CBOX_G(crash_enabled)) {
+		cbox_crash_open_sink();
 	}
 
 	/*

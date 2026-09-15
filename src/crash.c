@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -50,6 +51,8 @@ static struct sigaction cbox_crash_previous[CBOX_CRASH_SIGNALS];
 static bool             cbox_crash_installed = false;
 static cbox_crash_status cbox_crash_current_status = CBOX_CRASH_OFF;
 static char             cbox_crash_path[CBOX_CRASH_PATH_MAX];
+static char             cbox_crash_dir[CBOX_CRASH_PATH_MAX];
+static pid_t            cbox_crash_sink_pid = 0;
 
 /* ------------------------------------------------------------------ handler */
 
@@ -192,16 +195,68 @@ static bool cbox_crash_prepare_directory(const char *dir)
 	return access(dir, W_OK | X_OK) == 0;
 }
 
-static int cbox_crash_open_sink(const char *dir, int flags)
+static int cbox_crash_sink_name(char *out, size_t size, const char *dir, pid_t pid)
 {
-	char path[CBOX_CRASH_PATH_MAX];
-	int written = snprintf(path, sizeof(path), "%s/%s", dir, CBOX_CRASH_FILENAME);
+	int written = snprintf(out, size, "%s/%s%ld%s",
+		dir, CBOX_CRASH_FILE_PREFIX, (long) pid, CBOX_CRASH_FILE_SUFFIX);
 
-	if (written <= 0 || (size_t) written >= sizeof(path)) {
-		return -1;
+	return (written > 0 && (size_t) written < size) ? 0 : -1;
+}
+
+/* A process that is gone will never append again; one that is alive might. */
+static bool cbox_crash_process_alive(pid_t pid)
+{
+	if (pid <= 0) {
+		return false;
 	}
 
-	return open(path, flags | O_CLOEXEC | O_NOFOLLOW, 0600);
+	if (kill(pid, 0) == 0) {
+		return true;
+	}
+
+	/* Alive, just not ours to signal. */
+	return errno == EPERM;
+}
+
+void cbox_crash_open_sink(void)
+{
+	char path[CBOX_CRASH_PATH_MAX];
+	pid_t pid = getpid();
+
+	if (!cbox_crash_installed || cbox_crash_dir[0] == '\0') {
+		return;
+	}
+
+	/* Already open for this process — the common case on every request. */
+	if (cbox_crash_fd >= 0 && cbox_crash_sink_pid == pid) {
+		return;
+	}
+
+	if (cbox_crash_fd >= 0) {
+		close(cbox_crash_fd);
+		cbox_crash_fd = -1;
+	}
+
+	if (!cbox_crash_prepare_directory(cbox_crash_dir)) {
+		cbox_crash_current_status = CBOX_CRASH_NO_DIRECTORY;
+		return;
+	}
+
+	if (cbox_crash_sink_name(path, sizeof(path), cbox_crash_dir, pid) != 0) {
+		cbox_crash_current_status = CBOX_CRASH_NO_SINK;
+		return;
+	}
+
+	cbox_crash_fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
+
+	if (cbox_crash_fd < 0) {
+		cbox_crash_current_status = CBOX_CRASH_NO_SINK;
+		return;
+	}
+
+	cbox_crash_sink_pid = pid;
+	memcpy(cbox_crash_path, path, sizeof(path));
+	cbox_crash_current_status = CBOX_CRASH_ARMED;
 }
 
 cbox_crash_status cbox_crash_install(
@@ -211,30 +266,28 @@ cbox_crash_status cbox_crash_install(
 	const cbox_op_state    *ops
 ) {
 	struct sigaction action;
-	int index, written;
+	int index;
 	int flags = SA_SIGINFO | SA_RESTART;
 
 	if (cbox_crash_installed) {
 		return cbox_crash_current_status;
 	}
 
-	if (!cbox_crash_prepare_directory(dir)) {
+	if (dir == NULL || dir[0] == '\0'
+		|| strlen(dir) >= sizeof(cbox_crash_dir) - 32
+	) {
 		cbox_crash_current_status = CBOX_CRASH_NO_DIRECTORY;
 		return cbox_crash_current_status;
 	}
 
-	cbox_crash_fd = cbox_crash_open_sink(dir, O_WRONLY | O_CREAT | O_APPEND);
-
-	if (cbox_crash_fd < 0) {
-		cbox_crash_current_status = CBOX_CRASH_NO_SINK;
-		return cbox_crash_current_status;
-	}
-
-	written = snprintf(cbox_crash_path, sizeof(cbox_crash_path), "%s/%s", dir, CBOX_CRASH_FILENAME);
-
-	if (written <= 0 || (size_t) written >= sizeof(cbox_crash_path)) {
-		cbox_crash_path[0] = '\0';
-	}
+	/*
+	 * The directory is NOT created here. Module startup runs in the FPM master,
+	 * usually as root; creating it there would leave a root-owned 0700
+	 * directory that the workers cannot write to. The first request in each
+	 * worker opens the sink under the identity that will actually use it.
+	 */
+	strcpy(cbox_crash_dir, dir);
+	cbox_crash_path[0] = '\0';
 
 	memset(&cbox_crash_record_buffer, 0, sizeof(cbox_crash_record_buffer));
 	cbox_crash_record_buffer.magic = CBOX_CRASH_MAGIC;
@@ -265,8 +318,6 @@ cbox_crash_status cbox_crash_install(
 				sigaction(cbox_crash_signals[index], &cbox_crash_previous[index], NULL);
 			}
 
-			close(cbox_crash_fd);
-			cbox_crash_fd = -1;
 			cbox_crash_current_status = CBOX_CRASH_NO_HANDLER;
 
 			return cbox_crash_current_status;
@@ -275,6 +326,21 @@ cbox_crash_status cbox_crash_install(
 
 	cbox_crash_installed = true;
 	cbox_crash_current_status = CBOX_CRASH_ARMED;
+
+	/*
+	 * The sink is deliberately NOT opened here.
+	 *
+	 * Module startup runs in the FPM master, which is normally root. Opening
+	 * here creates the directory as root with mode 0700, and every worker —
+	 * running as www-data — is then locked out of its own crash sink for the
+	 * life of the pool. The recorder reports "unavailable: directory" and
+	 * records nothing, which is a silent loss of the whole feature in the most
+	 * common production deployment there is.
+	 *
+	 * RINIT is the first point that runs as the user who will actually write
+	 * the file, so that is where the sink is opened. A crash between module
+	 * startup and the first request is not covered; a crash in any request is.
+	 */
 
 	return cbox_crash_current_status;
 }
@@ -301,6 +367,8 @@ void cbox_crash_uninstall(void)
 	cbox_crash_ops = NULL;
 	cbox_crash_current_status = CBOX_CRASH_OFF;
 	cbox_crash_path[0] = '\0';
+	cbox_crash_dir[0] = '\0';
+	cbox_crash_sink_pid = 0;
 }
 
 cbox_crash_status cbox_crash_state(void)
@@ -335,27 +403,26 @@ static bool cbox_crash_record_valid(const cbox_crash_record *record)
 		&& record->crumb_count <= CBOX_CRASH_CRUMBS;
 }
 
-int cbox_crash_drain(const char *dir, uint32_t max, cbox_crash_visit_fn visit, void *context)
-{
+/*
+ * Read one dead process's sink and hand its records over.
+ * Returns the number visited, or -1 if the file could not be read.
+ */
+static int cbox_crash_drain_file(
+	const char          *path,
+	uint32_t             max,
+	cbox_crash_visit_fn  visit,
+	void                *context,
+	bool                *stop
+) {
 	int fd, visited = 0;
-	char *buffer = NULL;
+	char *buffer;
 	ssize_t got;
-	size_t size, offset = 0, consumed = 0;
+	size_t size, offset = 0;
 	struct stat info;
 
-	if (dir == NULL || visit == NULL || max == 0) {
-		return -1;
-	}
-
-	fd = cbox_crash_open_sink(dir, O_RDWR);
+	fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
 
 	if (fd < 0) {
-		return errno == ENOENT ? 0 : -1;
-	}
-
-	/* Advisory, and deliberately not taken by the handler — see the tail copy below. */
-	if (flock(fd, LOCK_EX) != 0) {
-		close(fd);
 		return -1;
 	}
 
@@ -378,10 +445,10 @@ int cbox_crash_drain(const char *dir, uint32_t max, cbox_crash_visit_fn visit, v
 	}
 
 	got = pread(fd, buffer, size, 0);
+	close(fd);
 
 	if (got <= 0) {
 		free(buffer);
-		close(fd);
 		return got == 0 ? 0 : -1;
 	}
 
@@ -391,53 +458,101 @@ int cbox_crash_drain(const char *dir, uint32_t max, cbox_crash_visit_fn visit, v
 		const cbox_crash_record *record = (const cbox_crash_record *) (buffer + offset);
 
 		if (!cbox_crash_record_valid(record)) {
-			/* Garbage or a format we don't know: skip a byte and resynchronise. */
+			/* Garbage or a format we do not know: resynchronise. */
 			offset++;
 			continue;
 		}
 
 		visited++;
 		offset += sizeof(cbox_crash_record);
-		consumed = offset;
 
 		if (!visit(record, context)) {
+			*stop = true;
 			break;
 		}
 	}
 
-	/*
-	 * Keep whatever we did not hand over, including anything appended by a
-	 * crashing process while we were reading (the handler cannot take the lock,
-	 * so this is the only thing standing between a concurrent crash and a lost
-	 * record).
-	 */
-	if (consumed > 0) {
-		char tail[8192];
-		off_t read_at = (off_t) consumed;
-		off_t write_at = 0;
+	free(buffer);
 
-		for (;;) {
-			ssize_t chunk = pread(fd, tail, sizeof(tail), read_at);
+	return visited;
+}
 
-			if (chunk <= 0) {
-				break;
-			}
+/*
+ * Drains every sink except this process's own, and only those whose owning
+ * process is gone.
+ *
+ * Nothing is ever truncated or compacted. That is the whole point: the crash
+ * handler cannot take a lock — locking is not async-signal-safe — so there is
+ * no way to stop a writer appending while a reader rewrites the same file. A
+ * dead process, on the other hand, will never append again, so its file can be
+ * read whole and removed.
+ *
+ * A live process's sink is skipped entirely rather than read-and-kept. Reading
+ * it would risk reporting the same record twice, and unlinking it would be far
+ * worse: the owner would carry on writing into a file with no name, and its
+ * eventual crash record would be lost.
+ */
+int cbox_crash_drain(const char *dir, uint32_t max, cbox_crash_visit_fn visit, void *context)
+{
+	DIR *handle;
+	struct dirent *entry;
+	int visited = 0;
+	bool stop = false;
+	pid_t self = getpid();
+	size_t prefix_len = sizeof(CBOX_CRASH_FILE_PREFIX) - 1;
 
-			if (pwrite(fd, tail, (size_t) chunk, write_at) != chunk) {
-				break;
-			}
+	if (dir == NULL || visit == NULL || max == 0) {
+		return -1;
+	}
 
-			read_at += chunk;
-			write_at += chunk;
+	handle = opendir(dir);
+
+	if (handle == NULL) {
+		return errno == ENOENT ? 0 : -1;
+	}
+
+	while (!stop && (uint32_t) visited < max && (entry = readdir(handle)) != NULL) {
+		char path[CBOX_CRASH_PATH_MAX];
+		const char *name = entry->d_name;
+		char *end = NULL;
+		long owner;
+		int found;
+
+		if (strncmp(name, CBOX_CRASH_FILE_PREFIX, prefix_len) != 0) {
+			continue;
 		}
 
-		if (ftruncate(fd, write_at) != 0) {
-			/* Leaving the file as-is only risks re-reporting, never data loss. */
+		owner = strtol(name + prefix_len, &end, 10);
+
+		if (end == NULL || strcmp(end, CBOX_CRASH_FILE_SUFFIX) != 0 || owner <= 0) {
+			continue;
+		}
+
+		if ((pid_t) owner == self || cbox_crash_process_alive((pid_t) owner)) {
+			continue;
+		}
+
+		if (cbox_crash_sink_name(path, sizeof(path), dir, (pid_t) owner) != 0) {
+			continue;
+		}
+
+		found = cbox_crash_drain_file(path, max - (uint32_t) visited, visit, context, &stop);
+
+		if (found >= 0) {
+			visited += found;
+
+			/*
+			 * Only once the owner is gone and we have read the file through.
+			 * If the visitor stopped early there may be records left, so keep
+			 * the file for the next drain.
+			 */
+			if (!stop) {
+				unlink(path);
+			}
 		}
 	}
 
-	free(buffer);
-	close(fd);
+	closedir(handle);
 
 	return visited;
 }

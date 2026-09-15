@@ -62,11 +62,15 @@ ZEND_BEGIN_MODULE_GLOBALS(cbox_telemetry)
 	cbox_crumb_ring crumbs;
 
 	uint32_t next_handle;
+	pid_t    owner_pid;      /* the process this native state belongs to */
 	uint64_t gc_runs_at_begin;
 	uint64_t gc_collected_at_begin;
 
 	bool active;      /* MINIT succeeded and the extension is usable */
-	bool hooks_armed; /* the observer is registered */
+	bool hooks_armed; /* at least one hook group was requested */
+
+	/* Why the profiler is not running, when it is not. */
+	const char *profiler_reason;
 ZEND_END_MODULE_GLOBALS(cbox_telemetry)
 
 ZEND_EXTERN_MODULE_GLOBALS(cbox_telemetry)

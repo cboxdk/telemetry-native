@@ -49,6 +49,38 @@ and a wide API invites callers to build policy on top of the wrong layer.
 detail. Decoding it in PHP with `unpack()` would freeze the layout the moment
 anyone shipped a parser.
 
+## The supported execution model
+
+**One active unit per PHP process.** A second `begin()` replaces the first; it
+does not stack, and there is no way to have two units in flight at once.
+
+That covers PHP-FPM, queue workers, Artisan commands and scheduled tasks, which
+is every runtime the Cbox stack uses. It does *not* cover concurrent logical
+work inside one process — Swoole, ReactPHP, Amp, or an Octane workload serving
+several requests in parallel. The profiler handles Fiber stacks correctly, but
+unit attribution is process-global, so two concurrent units would overwrite each
+other rather than be measured separately.
+
+This is a deliberate scope, not an oversight. Per-unit state that several
+coroutines can enter and leave independently is a different design with
+different costs, and nothing in the stack needs it yet.
+
+## Forking
+
+`fork()` copies this extension's memory but not the things it depends on:
+POSIX per-thread timers are explicitly not inherited, and neither are threads.
+A child that trusted the copied state would report profiling as active and
+collect nothing at all.
+
+So the extension notices. Every `begin()` and every request start compares the
+current pid against the one the state was built for, and on a mismatch it
+rebuilds what did not survive — the timer, the sampler thread, the inherited
+unit, and the crash sink descriptor, which still points at the parent's file.
+
+A pid check rather than `pthread_atfork()`: it needs no registration, cannot be
+bypassed by a fork we never saw, and the only places that care are the ones
+that ask.
+
 ## Rules the C side holds itself to
 
 **No Laravel knowledge.** A unit is a label from a fixed set and an optional

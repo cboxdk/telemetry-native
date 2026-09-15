@@ -35,7 +35,7 @@ typedef struct _cbox_frame_table {
 	uint32_t   *buckets;     /* open addressing; 0 = empty, else frame_id + 1 */
 	uint32_t    bucket_mask;
 
-	uint32_t    dropped;     /* frames refused because the table was full */
+	uint32_t    capacity_hits; /* times a frame could not be interned */
 } cbox_frame_table;
 
 int  cbox_frames_init(cbox_frame_table *table, uint32_t capacity);

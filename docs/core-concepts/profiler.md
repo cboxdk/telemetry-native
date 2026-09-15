@@ -89,6 +89,37 @@ looking like a shallow one.
 
 `sample_count` is the sum of `top_functions` samples, always.
 
+### How much of the profile landed where it says it did
+
+A sample can arrive late for two reasons that mean opposite things, so they are
+counted separately:
+
+| field | meaning | what to do about it |
+|---|---|---|
+| `deferred_samples` | the VM had not reached a safe point since the last tick — PHP was inside a long internal call | nothing; it is real signal. Trust the leaf frame less and look at the native operation timings |
+| `deferred_events` / `max_deferred` | how often, and the worst single stretch | a large `max_deferred` names a single very long native call |
+| `timer_overruns` | the kernel could not deliver at the requested period at all | sample less often; this period is finer than the platform manages |
+
+Nothing was observed for an overrun — those ticks are counted, not sampled — so
+a profile with more overruns than samples is mostly arithmetic. Folding the two
+into one number would hide the difference between "the application is in native
+code" and "the configuration is wrong".
+
+Measured on Linux with the CPU-time backend, a tight PHP loop:
+
+| requested period | samples | deferred | timer overruns |
+|---|---|---|---|
+| 1 ms (the default) | 297 | 0 | 3 |
+| 200 µs | 1,492 | 0 | 1,194 |
+
+At 200 µs four out of five ticks are never delivered. The profile still looks
+like it has 1,492 samples, and without `timer_overruns` there is nothing to say
+otherwise. This is the main reason the default is 1 ms.
+
+The wall-clock fallback backend defers heavily by construction — it keeps
+counting while the process is descheduled, so a sample can be attributed long
+after the time it represents. Another reason it is a development backend.
+
 ### Attribution of internal calls moves between PHP versions
 
 Where a sample taken during an internal call lands is the engine's business,

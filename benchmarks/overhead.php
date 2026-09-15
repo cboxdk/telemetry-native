@@ -10,6 +10,17 @@
  *   unit       begin/finish around each iteration, no profiling
  *   profile    begin/finish with the profiler running
  *   excimer    ext-excimer profiling at the same period, for comparison
+ *
+ * Two timing windows, because they answer different questions:
+ *
+ *   hot path    only the application work is timed. This is the cost imposed
+ *               while your code runs — what a p99 latency budget cares about.
+ *   end to end  begin() and finish() are inside the window, so materialising
+ *               the profile into PHP is counted. This is the cost of actually
+ *               keeping a profile, paid once per retained unit.
+ *
+ * Retaining and discarding are measured separately: tail retention only works
+ * if discarding is genuinely cheap.
  */
 
 declare(strict_types=1);
@@ -33,11 +44,19 @@ $work = $workloads[$name];
 // Warm up: let the JIT and the allocator settle before anything is timed.
 $work();
 
+$endToEnd = str_starts_with($mode, 'e2e');
+$retain = $mode === 'e2e_retain';
+
+if ($endToEnd) {
+    $mode = 'profile';
+}
+
 $samples = [];
 
 for ($i = 0; $i < $iterations; $i++) {
     $handle = 0;
     $excimer = null;
+    $outerStart = hrtime(true);
 
     if ($mode === 'unit') {
         $handle = cbox_telemetry_begin(['unit' => 'http', 'profile' => false]);
@@ -55,14 +74,13 @@ for ($i = 0; $i < $iterations; $i++) {
     $elapsed = hrtime(true) - $started;
 
     if ($mode === 'unit' || $mode === 'profile') {
-        // Materialise the profile, as a slow request would.
-        cbox_telemetry_finish($handle, $mode === 'profile');
+        cbox_telemetry_finish($handle, $endToEnd ? $retain : $mode === 'profile');
     } elseif ($mode === 'excimer' && $excimer !== null) {
         $excimer->stop();
         $excimer->getLog()->aggregateByFunction();
     }
 
-    $samples[] = $elapsed;
+    $samples[] = $endToEnd ? hrtime(true) - $outerStart : $elapsed;
 }
 
 sort($samples);

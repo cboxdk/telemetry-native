@@ -224,6 +224,17 @@ bool cbox_timer_armed(void)
 	return cbox_timer_is_armed;
 }
 
+void cbox_timer_after_fork(void)
+{
+	/*
+	 * Do not timer_delete() — the child never had the timer, and the handle is
+	 * meaningless here. Signal dispositions *are* inherited, so the handler
+	 * stays installed and only the timer needs recreating on next arm.
+	 */
+	cbox_timer_created = false;
+	cbox_timer_is_armed = false;
+}
+
 const char *cbox_timer_backend(void)
 {
 	return "posix-thread-cputime";
