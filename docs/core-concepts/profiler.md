@@ -168,6 +168,11 @@ is delivered at tick rate and reported as overruns. On the fallback backend it
 is the requested period plus scheduling latency, roughly a 2× error at 1 ms —
 usable for finding the hot function, not for absolute timings.
 
+Materialising a retained profile costs on the order of 0.1–0.3 ms for a
+profile of about seventy samples — the arrays are built once, at `finish()`.
+Discarding one instead costs nothing the harness can resolve, which is the
+whole point of deciding after the fact.
+
 ## What it does not do
 
 It is not a general-purpose profiler and has no ambition to be. There is no

@@ -54,12 +54,27 @@ FROM httpd:2.4-alpine
 ENV PATH="/usr/local/apache2/bin:${PATH}"
 AB
 
-# Scenarios are interleaved, not run one after another.
+# Scenarios are interleaved and shuffled, not run one after another.
 #
 # Running them in sequence made the extension look 8.5% more expensive than
 # baseline purely by being measured later: an A/B/A/B of the same two configs
 # came back at -0.3%, +0.8%, -0.8%. The machine drifts over minutes, so every
 # scenario has to be sampled in every round and compared by median.
+#
+# Interleaving alone still leaves each scenario at a fixed position in the
+# round, which a periodic disturbance can track. The order is shuffled per
+# round as well.
+#
+# Scenario 1 is the baseline a second time, with nothing changed. Whatever it
+# differs from scenario 0 by is measurement error by construction, and it is
+# the only honest way to state a noise floor -- on the machine this was
+# written on it came out at 1.6%, which is larger than several of the effects
+# the table was originally read as showing.
+# `shuf` is not in every base image; awk is.
+shuffle_lines() {
+  awk 'BEGIN { srand() } { print rand() "\t" $0 }' | sort -k1,1n | cut -f2-
+}
+
 start_app() {
   local ini_file="$1"
 
@@ -112,7 +127,8 @@ median() {
 
 SCENARIO_LABELS=(
   "baseline (no extension)"
-  "loaded, never called"
+  "baseline again (control)"
+  "loaded, hooks off"
   "hooks armed"
   "auto profiling @1ms"
   "auto profiling @200us"
@@ -120,8 +136,12 @@ SCENARIO_LABELS=(
 
 SCENARIO_INIS=(
   ""
+  ""
   "extension=cbox_telemetry.so
 cbox_telemetry.auto=0
+cbox_telemetry.hooks.pdo=0
+cbox_telemetry.hooks.redis=0
+cbox_telemetry.hooks.curl=0
 cbox_telemetry.crash.enabled=0"
   "extension=cbox_telemetry.so
 cbox_telemetry.auto=0
@@ -172,7 +192,8 @@ done
 
 for round in $(seq 1 "$REPEATS"); do
   echo "  round $round/$REPEATS…"
-  for i in "${!SCENARIO_LABELS[@]}"; do
+  order=$(for i in "${!SCENARIO_LABELS[@]}"; do echo "$i"; done | shuffle_lines)
+  for i in $order; do
     measure_once "$i" || continue
     CPU_SAMPLES[$i]="${CPU_SAMPLES[$i]} $MEASURED_CPU"
     RPS_SAMPLES[$i]="${RPS_SAMPLES[$i]} $MEASURED_RPS"
@@ -194,11 +215,11 @@ for i in "${!SCENARIO_LABELS[@]}"; do
 done
 
 if [ "$SOAK_SECONDS" -gt 0 ]; then
-  printf '%s\n' "${SCENARIO_INIS[3]}" > "$WORKDIR/soak.ini"
+  printf '%s\n' "${SCENARIO_INIS[4]}" > "$WORKDIR/soak.ini"
   start_app "$WORKDIR/soak.ini" || exit 1
 
   echo
-  echo "soak: ${SCENARIO_LABELS[3]}, ${SOAK_SECONDS}s sustained at concurrency $CONCURRENCY"
+  echo "soak: ${SCENARIO_LABELS[4]}, ${SOAK_SECONDS}s sustained at concurrency $CONCURRENCY"
 
   docker run -d --rm --name cbox-load-soak --network "$NET" "$AB_IMAGE" \
     ab -q -c "$CONCURRENCY" -t "$SOAK_SECONDS" -n 100000000 "http://$APP/" >/dev/null 2>&1
