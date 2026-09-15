@@ -14,14 +14,23 @@ var_dump($status['unit_handle'] > 0);
 var_dump($status['unit_automatic']);
 
 // The SAPI guess: this runs under CLI.
-function cbox_auto_work(): void
+/*
+ * Bounded by elapsed time rather than iterations: the fallback timer backend
+ * samples wall clock at the scheduler's granularity, and a fixed loop can
+ * finish before its first tick on a fast machine.
+ */
+function cbox_auto_work(float $ms): void
 {
-    for ($i = 0; $i < 200000; $i++) {
-        sqrt($i);
+    $until = microtime(true) + $ms / 1000;
+
+    while (microtime(true) < $until) {
+        for ($i = 0; $i < 5000; $i++) {
+            sqrt($i);
+        }
     }
 }
 
-cbox_auto_work();
+cbox_auto_work(150);
 
 // Handle 0 means "whatever is open", which is what a terminate hook has.
 $result = cbox_telemetry_finish(0, true);

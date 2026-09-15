@@ -7,18 +7,26 @@ cbox_telemetry.auto=1
 cbox_telemetry.profiler.period_us=200
 --FILE--
 <?php
+/* Time-bounded for the same reason as 017: see the note there. */
+function cbox_spin(float $ms): void
+{
+    $until = microtime(true) + $ms / 1000;
+
+    while (microtime(true) < $until) {
+        for ($i = 0; $i < 5000; $i++) {
+            sqrt($i);
+        }
+    }
+}
+
 function cbox_before(): void
 {
-    for ($i = 0; $i < 400000; $i++) {
-        sqrt($i);
-    }
+    cbox_spin(120);
 }
 
 function cbox_after(): void
 {
-    for ($i = 0; $i < 400000; $i++) {
-        log($i + 1);
-    }
+    cbox_spin(120);
 }
 
 $automatic = cbox_telemetry_status()['unit_handle'];
