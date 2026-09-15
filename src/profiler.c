@@ -40,6 +40,7 @@ static struct {
 	uint64_t samples;
 	uint64_t dropped;
 	uint64_t deferred;
+	uint64_t deadline_checked_at; /* sample count at the last deadline check */
 	uint64_t deferred_events;
 	uint64_t timer_overruns;
 	uint32_t max_deferred;
@@ -271,16 +272,24 @@ static void cbox_profiler_interrupt(zend_execute_data *execute_data)
 		cbox_profiler_collect(pending);
 
 		/*
-		 * Check the deadline rarely — once every few hundred samples is
-		 * plenty for a valve measured in seconds, and a clock read on every
-		 * sample would be a real cost at a 100 us period.
+		 * Check the deadline rarely — once every few hundred samples is plenty
+		 * for a valve measured in seconds, and a clock read on every sample
+		 * would be a real cost at a 100 us period.
+		 *
+		 * Compare against the last checked count rather than testing the
+		 * counter for a round number: samples advances by the number of ticks
+		 * booked at once, so it steps straight over any exact value and the
+		 * check may never fire at all.
 		 */
 		if (cbox_profiler.deadline_ns != 0
-			&& (cbox_profiler.samples & 0x3ff) == 0
-			&& cbox_now_ns() > cbox_profiler.deadline_ns
+			&& cbox_profiler.samples - cbox_profiler.deadline_checked_at >= 512
 		) {
-			cbox_profiler_stop();
-			cbox_profiler.capped = true;
+			cbox_profiler.deadline_checked_at = cbox_profiler.samples;
+
+			if (cbox_now_ns() > cbox_profiler.deadline_ns) {
+				cbox_profiler_stop();
+				cbox_profiler.capped = true;
+			}
 		}
 	}
 
@@ -417,6 +426,7 @@ void cbox_profiler_reset(void)
 	cbox_profiler.samples = 0;
 	cbox_profiler.dropped = 0;
 	cbox_profiler.deferred = 0;
+	cbox_profiler.deadline_checked_at = 0;
 	cbox_profiler.deferred_events = 0;
 	cbox_profiler.timer_overruns = 0;
 	cbox_profiler.max_deferred = 0;

@@ -19,7 +19,7 @@
 #include "src/unit.h"
 
 #define PHP_CBOX_TELEMETRY_NAME    "cbox_telemetry"
-#define PHP_CBOX_TELEMETRY_VERSION "0.1.0-dev"
+#define PHP_CBOX_TELEMETRY_VERSION "0.1.0"
 
 extern zend_module_entry cbox_telemetry_module_entry;
 #define phpext_cbox_telemetry_ptr &cbox_telemetry_module_entry

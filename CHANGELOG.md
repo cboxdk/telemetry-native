@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-15
+
 ### Added
 
 - Statistical CPU profiler. The timer never walks the stack itself: it bumps a
@@ -67,6 +69,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **One lost sample could count as several drops.** `profiler.dropped` is now
   exactly "sampling events that could not be represented"; the capacity
   counters that explain why are reported separately.
+- **The profiler's duration cap could never fire.** It tested the sample
+  counter for an exact round number, but that counter advances by however many
+  ticks were booked at once, so it steps straight over the checkpoint. An
+  automatic unit in a long-running process would have sampled forever — which
+  is the one thing the cap exists to prevent. Found by its own test flaking on
+  PHP 8.5 rather than by reading the code.
 - **The macOS timer had a data race.** The armed flag was read by the sampler
   thread outside the mutex that guarded its writes. Now atomic.
 
@@ -107,4 +115,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proportion to the sampling rate. The fallback backend samples wall clock
   instead of CPU time and says so, in `status()` and in every profile.
 
-[Unreleased]: https://github.com/cboxdk/telemetry-native/compare/main...HEAD
+[Unreleased]: https://github.com/cboxdk/telemetry-native/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/cboxdk/telemetry-native/releases/tag/v0.1.0
