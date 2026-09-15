@@ -72,13 +72,33 @@ The handler restores whatever disposition was there before and lets the process
 die exactly as it would have — core dump, FPM child accounting, everything. A
 handler that swallowed the signal would be far worse than no handler.
 
+The handlers are installed with `SA_NODEFER`, so the signal stays deliverable
+while we are handling it. Without that, a fault *inside* the handler is masked,
+and Darwin neither force-delivers it nor re-enters the handler: the thread
+re-executes the faulting instruction forever. The re-entrancy latch turns that
+into a clean `_exit`, but only if the signal can be delivered at all.
+
 It always re-raises after restoring. An earlier version only did that for
 signals it judged to have been *sent*, trusting a hardware fault to re-trap on
 return — but `si_code` does not mean the same thing everywhere. Darwin reports
 `si_code = 2` for a `kill()`-sent SIGSEGV too, so that version classified it as
 a fault, returned, and left the process running after a fatal signal, having
-already written a crash record for it. Re-raising costs a real fault nothing:
-it re-traps before the pending signal is ever delivered.
+already written a crash record for it. There is a second cost, measured rather than assumed: under a storm of three
+or more identical fatal signals within a few milliseconds, a later one can
+re-enter the handler while the first is still writing. The re-entrancy latch
+turns that into a clean `_exit(128 + signal)`, so the process still dies
+correctly — but that record is lost. In a 40-signal burst roughly half produced
+no record. A single fatal signal, which is the real case, was recorded every
+time on every platform tested.
+
+There is a real cost to that, and it is worth stating: because the signal is
+unblocked, `raise()` terminates the process from inside the handler rather than
+letting the original instruction re-trap. A core dump therefore records the
+`raise` as the terminating context rather than the faulting instruction, which
+makes core-based grouping less precise. The record written just before it
+carries the faulting address and program counter, so the information is not
+lost — but a process that survives a fatal signal is a worse failure than a
+slightly less precise core, which is why it is done this way.
 
 If another handler was installed before ours, it is chained rather than
 replaced.
@@ -97,6 +117,24 @@ drain therefore only touches files whose owning process is gone: a dead process
 appends nothing, so its file can be read whole and removed. Live processes'
 sinks are skipped entirely, because unlinking one would leave its owner writing
 into a file with no name and lose the very crash it was there to catch.
+
+**In a directory only this user can open.** The configured `crash.dir` is a
+*base*; each uid gets its own `0700` subdirectory under it, named for the uid,
+and sinks live there. The mode is forced with `chmod` after `mkdir`, because
+`mkdir`'s mode argument is masked by the umask — under the usual `022` a
+directory asked for as `01733` is created `01711`.
+
+A base owned by another user is refused outright unless that user is root and
+the directory follows the `/tmp` contract (sticky and world-writable). Sticky
+alone is not enough: it stops *other users* removing an entry, but the
+directory's owner can always remove entries in it, so an unprivileged user who
+wins the race to create the base could otherwise delete or rename every crash
+record on the host. Losing that race now costs crash recording — reported as
+`unavailable: directory` — rather than handing it to whoever won.
+
+For several FPM pools running as different users, point them at one
+root-provisioned base (`mkdir -m 01777`, root-owned) or give each pool its own
+`crash.dir`.
 
 **Prepared on the first request, because of PHP-FPM.** The master starts as
 root and runs module startup; workers then drop to another user. A directory

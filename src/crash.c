@@ -61,6 +61,7 @@ static cbox_crash_status cbox_crash_current_status = CBOX_CRASH_OFF;
 static uint64_t          cbox_crash_module_base = 0;
 static char             cbox_crash_path[CBOX_CRASH_PATH_MAX];
 static char             cbox_crash_dir[CBOX_CRASH_PATH_MAX];
+static char             cbox_crash_owned_dir[CBOX_CRASH_PATH_MAX];
 static pid_t            cbox_crash_sink_pid = 0;
 
 /* ------------------------------------------------------------------ handler */
@@ -153,7 +154,13 @@ static void cbox_crash_handler(int sig, siginfo_t *info, void *context)
 	if (cbox_crash_fd < 0 && cbox_crash_path[0] != '\0') {
 		cbox_crash_fd = open(
 			cbox_crash_path,
-			O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW,
+			/*
+			 * O_NONBLOCK for the same reason the drain has it: a FIFO planted
+			 * under this name would otherwise block open() waiting for a
+			 * reader, and a crashing worker would hang there forever instead
+			 * of dying. O_NOFOLLOW does not help — a FIFO is not a symlink.
+			 */
+			O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK,
 			0600
 		);
 
@@ -189,6 +196,7 @@ static void cbox_crash_handler(int sig, siginfo_t *info, void *context)
 		if (cbox_crash_unit != NULL) {
 			record->unit_type = cbox_crash_unit->type;
 			record->has_trace = cbox_crash_unit->has_trace ? 1 : 0;
+			record->has_span = cbox_crash_unit->has_span ? 1 : 0;
 			record->unit_start_ns = cbox_crash_unit->start_ns;
 			memcpy(record->trace_id, cbox_crash_unit->trace_id, CBOX_TRACE_ID_BYTES);
 			memcpy(record->span_id, cbox_crash_unit->span_id, CBOX_SPAN_ID_BYTES);
@@ -258,55 +266,112 @@ static void cbox_crash_handler(int sig, siginfo_t *info, void *context)
 
 /* ------------------------------------------------------------------- install */
 
-static bool cbox_crash_prepare_directory(const char *dir)
+/*
+ * Force the mode regardless of umask. mkdir() cannot: its mode argument is
+ * masked, so mkdir(dir, 01733) under the usual umask 022 produces 01711 and
+ * every other user is locked out — which was the entire point of widening it.
+ */
+static bool cbox_crash_make_directory(const char *path, mode_t mode)
+{
+	if (mkdir(path, mode) != 0) {
+		return false;
+	}
+
+	if (chmod(path, mode) != 0) {
+		rmdir(path);
+		return false;
+	}
+
+	return true;
+}
+
+static bool cbox_crash_directory_is_ours(const char *path, mode_t forbidden)
 {
 	struct stat info;
+
+	if (lstat(path, &info) != 0) {
+		return false;
+	}
+
+	return S_ISDIR(info.st_mode)
+		&& !S_ISLNK(info.st_mode)
+		&& info.st_uid == geteuid()
+		&& (info.st_mode & forbidden) == 0;
+}
+
+/*
+ * Produces a directory this process owns privately, and refuses anything else.
+ *
+ * The base may be shared — /tmp/cbox-telemetry is the default and several FPM
+ * pools, an opcache.preload user and the CLI may all arrive at it. Each uid
+ * therefore gets its own 0700 subdirectory and never writes into the base.
+ *
+ * An earlier attempt made the base itself group- and world-writable so that
+ * any pool could drop files in it, and accepted a pre-existing base owned by
+ * somebody else if it was sticky. Both were wrong. An unprivileged user can
+ * win the race to create /tmp/cbox-telemetry, and sticky does not protect
+ * files from the directory's *owner* — they could then delete or rename every
+ * crash record on the host. Demonstrated, not theorised.
+ */
+static bool cbox_crash_prepare_directory(const char *dir, char *out, size_t out_size)
+{
+	struct stat info;
+	int written;
 
 	if (dir == NULL || dir[0] == '\0') {
 		return false;
 	}
 
-	/*
-	 * 01733: owner rwx, others write+execute, sticky, nobody can list it.
-	 *
-	 * 0700 was wrong in a way that silently disabled the whole feature. With
-	 * opcache.preload the directory is created by the preload subprocess
-	 * running as preload_user, and under FPM with several pools the first pool
-	 * to serve a request owns it — in both cases every other user is locked
-	 * out for the life of the process. Sticky means nobody can remove or
-	 * rename a sink that is not theirs, and the handler refuses to write into
-	 * a file it does not own, so a shared directory stays safe.
-	 */
-	if (mkdir(dir, 01733) == 0) {
-		return true;
-	}
-
-	if (errno != EEXIST) {
-		return false;
-	}
-
-	/*
-	 * It already exists. Only use it when it is a real directory that we own —
-	 * a shared /tmp path is a symlink and ownership trap otherwise.
-	 */
 	if (lstat(dir, &info) != 0) {
+		/*
+		 * Ours alone. A shared base has to be provisioned deliberately by
+		 * packaging (root-owned, sticky, world-writable); we never create one.
+		 */
+		if (!cbox_crash_make_directory(dir, 0700)) {
+			return false;
+		}
+	} else if (!S_ISDIR(info.st_mode) || S_ISLNK(info.st_mode)) {
+		return false;
+	} else if (info.st_uid != geteuid()) {
+		/*
+		 * A base someone else owns is only acceptable if that someone is root
+		 * and it follows the /tmp contract: sticky and world-writable.
+		 *
+		 * Sticky is not enough on its own. It stops *other users* removing an
+		 * entry, but the directory's owner can always remove entries in it —
+		 * so an unprivileged user who wins the race to create the base can
+		 * delete or rename every crash record on the host, whatever the mode
+		 * says. Verified with two real users before this check existed.
+		 *
+		 * Losing that race now costs crash recording, reported by status() as
+		 * "unavailable: directory", rather than handing it to whoever won.
+		 */
+		if (info.st_uid != 0
+			|| (info.st_mode & S_ISVTX) == 0
+			|| (info.st_mode & S_IWOTH) == 0
+		) {
+			return false;
+		}
+	}
+
+	written = snprintf(out, out_size, "%s/%lu", dir, (unsigned long) geteuid());
+
+	if (written <= 0 || (size_t) written >= out_size) {
 		return false;
 	}
 
-	if (!S_ISDIR(info.st_mode) || S_ISLNK(info.st_mode)) {
+	if (lstat(out, &info) != 0) {
+		if (!cbox_crash_make_directory(out, 0700)) {
+			return false;
+		}
+	}
+
+	/* Fail closed: if it is not a private directory of ours, do not use it. */
+	if (!cbox_crash_directory_is_ours(out, S_IRWXG | S_IRWXO)) {
 		return false;
 	}
 
-	/*
-	 * Ours is always fine. Someone else's is fine only if it is sticky —
-	 * otherwise they could swap our sink for something else between our
-	 * checking it and the handler writing to it.
-	 */
-	if (info.st_uid != geteuid() && (info.st_mode & S_ISVTX) == 0) {
-		return false;
-	}
-
-	return access(dir, W_OK | X_OK) == 0;
+	return access(out, W_OK | X_OK) == 0;
 }
 
 static int cbox_crash_sink_name(char *out, size_t size, const char *dir, pid_t pid)
@@ -360,12 +425,12 @@ void cbox_crash_open_sink(void)
 	 * The file is not: it is created by the handler, if there is ever anything
 	 * to put in it.
 	 */
-	if (!cbox_crash_prepare_directory(cbox_crash_dir)) {
+	if (!cbox_crash_prepare_directory(cbox_crash_dir, cbox_crash_owned_dir, sizeof(cbox_crash_owned_dir))) {
 		cbox_crash_current_status = CBOX_CRASH_NO_DIRECTORY;
 		return;
 	}
 
-	if (cbox_crash_sink_name(path, sizeof(path), cbox_crash_dir, pid) != 0) {
+	if (cbox_crash_sink_name(path, sizeof(path), cbox_crash_owned_dir, pid) != 0) {
 		cbox_crash_current_status = CBOX_CRASH_NO_SINK;
 		return;
 	}
@@ -510,6 +575,7 @@ void cbox_crash_uninstall(void)
 	cbox_crash_current_status = CBOX_CRASH_OFF;
 	cbox_crash_path[0] = '\0';
 	cbox_crash_dir[0] = '\0';
+	cbox_crash_owned_dir[0] = '\0';
 	cbox_crash_sink_pid = 0;
 }
 
@@ -570,7 +636,8 @@ static int cbox_crash_drain_file(
 	cbox_crash_visit_fn  visit,
 	void                *context,
 	bool                *stop,
-	bool                *consumable
+	bool                *consumable,
+	off_t               *consumed_bytes
 ) {
 	int fd, visited = 0;
 	char *buffer;
@@ -581,6 +648,7 @@ static int cbox_crash_drain_file(
 	struct stat info;
 
 	*consumable = false;
+	*consumed_bytes = 0;
 
 	/*
 	 * O_NONBLOCK because this path is not necessarily ours: a FIFO planted
@@ -636,9 +704,15 @@ static int cbox_crash_drain_file(
 
 	size = (size_t) got;
 
-	while (offset + sizeof(cbox_crash_record) <= size && (uint32_t) visited < max) {
+	while (offset + sizeof(cbox_crash_record_header_probe) <= size && (uint32_t) visited < max) {
 		const cbox_crash_record *record = (const cbox_crash_record *) (buffer + offset);
 
+		/*
+		 * The loop advances on the shared header, not on this version's record
+		 * size: a foreign record *smaller* than ours would otherwise never be
+		 * examined at the end of a file, and the file would be deleted as if
+		 * it had been read.
+		 */
 		if (cbox_crash_record_foreign_version(record, size - offset)) {
 			/* Step over it by its own length and keep the file. */
 			foreign_seen = true;
@@ -646,14 +720,17 @@ static int cbox_crash_drain_file(
 			continue;
 		}
 
-		if (!cbox_crash_record_valid(record)) {
-			/* Garbage: resynchronise a byte at a time. */
+		if (offset + sizeof(cbox_crash_record) > size
+			|| !cbox_crash_record_valid(record)
+		) {
+			/* Garbage, or a truncated tail: resynchronise a byte at a time. */
 			offset++;
 			continue;
 		}
 
 		visited++;
 		offset += sizeof(cbox_crash_record);
+		*consumed_bytes = (off_t) offset;
 
 		if (!visit(record, context)) {
 			*stop = true;
@@ -670,11 +747,60 @@ static int cbox_crash_drain_file(
 	 */
 	*consumable = !foreign_seen
 		&& (size_t) file_size == size
-		&& offset + sizeof(cbox_crash_record) > size;
+		&& offset + sizeof(cbox_crash_record_header_probe) > size;
+
+	if (foreign_seen) {
+		/* Keep everything: a version we cannot read is not ours to discard. */
+		*consumed_bytes = 0;
+	}
 
 	free(buffer);
 
 	return visited;
+}
+
+/*
+ * Discard the first `consumed` bytes of a sink, keeping the rest.
+ *
+ * Only ever called for a file whose owning process has exited, which is what
+ * makes it safe: an earlier design compacted a shared sink that live workers
+ * were still appending to, and lost whatever arrived between the read and the
+ * truncate.
+ */
+static void cbox_crash_compact(const char *path, off_t consumed)
+{
+	int fd;
+	char buffer[8192];
+	off_t read_at = consumed;
+	off_t write_at = 0;
+
+	fd = open(path, O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+
+	if (fd < 0) {
+		return;
+	}
+
+	for (;;) {
+		ssize_t chunk = pread(fd, buffer, sizeof(buffer), read_at);
+
+		if (chunk <= 0) {
+			break;
+		}
+
+		if (pwrite(fd, buffer, (size_t) chunk, write_at) != chunk) {
+			close(fd);
+			return;
+		}
+
+		read_at += chunk;
+		write_at += chunk;
+	}
+
+	if (ftruncate(fd, write_at) != 0) {
+		/* Leaving it long only risks re-reporting, never loss. */
+	}
+
+	close(fd);
 }
 
 /*
@@ -699,6 +825,8 @@ int cbox_crash_drain(const char *dir, uint32_t max, cbox_crash_visit_fn visit, v
 	int visited = 0;
 	bool stop = false;
 	bool consumable = false;
+	off_t consumed = 0;
+	char owned[CBOX_CRASH_PATH_MAX];
 	pid_t self = getpid();
 	size_t prefix_len = sizeof(CBOX_CRASH_FILE_PREFIX) - 1;
 
@@ -706,6 +834,11 @@ int cbox_crash_drain(const char *dir, uint32_t max, cbox_crash_visit_fn visit, v
 		return -1;
 	}
 
+	if (!cbox_crash_prepare_directory(dir, owned, sizeof(owned))) {
+		return 0;
+	}
+
+	dir = owned;
 	handle = opendir(dir);
 
 	if (handle == NULL) {
@@ -738,7 +871,9 @@ int cbox_crash_drain(const char *dir, uint32_t max, cbox_crash_visit_fn visit, v
 		}
 
 		consumable = false;
-		found = cbox_crash_drain_file(path, max - (uint32_t) visited, visit, context, &stop, &consumable);
+		consumed = 0;
+		found = cbox_crash_drain_file(path, max - (uint32_t) visited, visit, context,
+			&stop, &consumable, &consumed);
 
 		if (found >= 0) {
 			visited += found;
@@ -751,6 +886,19 @@ int cbox_crash_drain(const char *dir, uint32_t max, cbox_crash_visit_fn visit, v
 			 */
 			if (consumable) {
 				unlink(path);
+			} else if (consumed > 0) {
+				/*
+				 * Could not finish the file — the caller's budget ran out, or
+				 * it is larger than one read. Drop what was handed over so the
+				 * next drain starts where this one stopped; without this the
+				 * same records are returned on every call and the sink is
+				 * never reclaimed.
+				 *
+				 * Rewriting is safe here in a way it was not before: this file
+				 * belongs to a process that has exited, so nothing can be
+				 * appending to it while we compact.
+				 */
+				cbox_crash_compact(path, consumed);
 			}
 		}
 	}

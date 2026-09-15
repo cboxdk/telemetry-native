@@ -35,7 +35,7 @@ work through the `begin()` context, which is the better place to do it.
 | `cbox_telemetry.hooks.streams` | `0` | | SYSTEM | Time `stream_socket_client` and `fsockopen`. Off by default — noisy, and it overlaps whatever the caller already instruments. |
 | `cbox_telemetry.breadcrumbs.size` | `256` | 16 – 4096 | SYSTEM | Ring entries, 64 bytes each. Rounded up to a power of two. |
 | `cbox_telemetry.crash.enabled` | `1` | | SYSTEM | Install the fatal-signal handlers. The kill switch if they are ever suspected. |
-| `cbox_telemetry.crash.dir` | `/tmp/cbox-telemetry` | | SYSTEM | Where records are written. Created `0700`; refused if it exists and is not a directory owned by this user. |
+| `cbox_telemetry.crash.dir` | `/tmp/cbox-telemetry` | | SYSTEM | Base directory. Each uid gets a private `0700` subdirectory under it. A base owned by another user is refused unless that user is root and it is sticky and world-writable. |
 | `cbox_telemetry.auto` | `0` | | SYSTEM | Open a unit of work automatically at the start of every request. See below. |
 | `cbox_telemetry.auto_max_ms` | `60000` | 1000 – 3600000 | SYSTEM | How long an automatic unit may sample before the profiler stops itself. Only applies to automatic units. |
 
@@ -92,12 +92,17 @@ notice the mismatch and say so.
 
 ## PHP-FPM
 
-The crash directory is created by the first worker to serve a request, not by
-the master, so it belongs to the pool user rather than root. One consequence:
-**give each pool its own `cbox_telemetry.crash.dir`** when pools run as
-different users. The first pool to start owns the directory, and others will
-report `unavailable: directory` in `cbox_telemetry_status()` — truthfully, but
-they will record nothing.
+The crash directory is prepared by the first worker to serve a request, not by
+the master, so it belongs to the pool user rather than root. Pools running as
+different users can still share one base, because each uid writes into its own
+`0700` subdirectory of it.
+
+What they cannot share is a base an unprivileged user created first. Such a
+base is refused, and those workers report `unavailable: directory` in
+`cbox_telemetry_status()` — truthfully, but they record nothing. On a host
+where other users can write the parent path, provision the base yourself as
+root (`mkdir -m 01777 /var/lib/cbox-telemetry`), or give each pool a
+`cbox_telemetry.crash.dir` inside a directory that pool owns.
 
 ## Sizing memory
 

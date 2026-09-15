@@ -47,9 +47,16 @@ means. This extension has nothing to redact.
 `cbox_telemetry.crash.dir` defaults to `/tmp/cbox-telemetry`, which is a shared
 location, so:
 
-- The directory is created `0700` and the file `0600`.
-- A pre-existing path is used only if it is a real directory (not a symlink) and
-  owned by the current user. Anything else disarms the recorder.
+- Sinks live in a per-uid `0700` subdirectory of the configured base, and the
+  files are `0600`. The mode is forced with `chmod`, because `mkdir` is masked
+  by the umask.
+- A base owned by another user is refused unless that user is root and the
+  directory is sticky and world-writable. Sticky alone is not enough: the
+  directory's owner can remove entries regardless of it.
+- The handler refuses to write unless `fstat` says the sink is a regular file
+  owned by this user with exactly one link, and the drain refuses to read one
+  that is not. Both open with `O_NOFOLLOW` and `O_NONBLOCK`, so neither a
+  symlink nor a planted FIFO can redirect or stall them.
 - The sink is opened `O_NOFOLLOW`.
 - If any of that fails, the recorder disables itself and reports the reason in
   `cbox_telemetry_status()['crash_recorder']`. It never falls back to a location

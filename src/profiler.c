@@ -41,7 +41,9 @@ static struct {
 	uint64_t dropped;
 	uint64_t deferred;
 	uint64_t interrupts;          /* safe points reached, recorded or not */
+	uint64_t ticks;               /* timer ticks accounted for, including overruns */
 	uint64_t deadline_checked_at; /* interrupt count at the last deadline check */
+	uint64_t deadline_ticks_at;   /* tick count at the last deadline check */
 	uint64_t deferred_events;
 	uint64_t timer_overruns;
 	uint32_t max_deferred;
@@ -286,6 +288,7 @@ static void cbox_profiler_interrupt(zend_execute_data *execute_data)
 
 	if (pending > 0 && cbox_profiler.running && cbox_profiler.ready) {
 		cbox_profiler.interrupts++;
+		cbox_profiler.ticks += pending;
 
 		/*
 		 * Ticks the kernel counted but never delivered. Nothing was observed
@@ -326,10 +329,18 @@ static void cbox_profiler_interrupt(zend_execute_data *execute_data)
 		 * needed: measured 3.5 seconds against a 1 second cap, with 31,000
 		 * stack walks taken after the deadline had passed.
 		 */
+		/*
+		 * Whichever comes first. Interrupts alone are not enough: a workload
+		 * sitting in native code reaches few safe points, so 512 of them can
+		 * span minutes. Ticks alone are not enough either, since they stop
+		 * being recorded when storage fills. Together neither case starves.
+		 */
 		if (cbox_profiler.deadline_ns != 0
-			&& cbox_profiler.interrupts - cbox_profiler.deadline_checked_at >= 512
+			&& (cbox_profiler.interrupts - cbox_profiler.deadline_checked_at >= 512
+				|| cbox_profiler.ticks - cbox_profiler.deadline_ticks_at >= 512)
 		) {
 			cbox_profiler.deadline_checked_at = cbox_profiler.interrupts;
+			cbox_profiler.deadline_ticks_at = cbox_profiler.ticks;
 
 			if (cbox_now_ns() > cbox_profiler.deadline_ns) {
 				cbox_profiler_stop();
@@ -478,7 +489,9 @@ void cbox_profiler_reset(void)
 	cbox_profiler.dropped = 0;
 	cbox_profiler.deferred = 0;
 	cbox_profiler.interrupts = 0;
+	cbox_profiler.ticks = 0;
 	cbox_profiler.deadline_checked_at = 0;
+	cbox_profiler.deadline_ticks_at = 0;
 	cbox_profiler.deferred_events = 0;
 	cbox_profiler.timer_overruns = 0;
 	cbox_profiler.max_deferred = 0;

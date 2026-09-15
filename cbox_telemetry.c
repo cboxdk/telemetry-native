@@ -83,9 +83,15 @@ cbox_op_token cbox_telemetry_note_op_begin(cbox_op_type type)
 		return cbox_ops_begin(&CBOX_G(ops), type, now);
 	}
 
-	token.type = CBOX_OP_NONE;
+	/*
+	 * No unit, so nothing is aggregated — but the type is kept so the closing
+	 * breadcrumb can still say which operation it was. A crash outside a unit
+	 * is exactly when that identity is worth having.
+	 */
+	token.type = type;
 	token.start_ns = now;
 	token.slot = CBOX_OP_NO_SLOT;
+	token.generation = CBOX_G(ops).generation;
 
 	return token;
 }
@@ -355,11 +361,20 @@ static void cbox_unit_apply_trace(cbox_unit_state *unit, HashTable *context)
 
 	if ((value = cbox_context_find(context, "span_id", sizeof("span_id") - 1)) != NULL
 		&& Z_TYPE_P(value) == IS_STRING
-		&& !cbox_hex_decode(Z_STRVAL_P(value), Z_STRLEN_P(value), unit->span_id, CBOX_SPAN_ID_BYTES)
 	) {
-		/* A failed decode leaves a half-written id; an all-zero span id is
-		 * invalid per W3C and a consumer may not check. Report nothing. */
-		memset(unit->span_id, 0, CBOX_SPAN_ID_BYTES);
+		/*
+		 * A failed decode leaves a half-written id, and an all-zero span id is
+		 * invalid per W3C while looking perfectly well-formed to a consumer.
+		 * Track presence separately so absent really is absent.
+		 */
+		if (cbox_hex_decode(Z_STRVAL_P(value), Z_STRLEN_P(value), unit->span_id, CBOX_SPAN_ID_BYTES)
+			&& !cbox_bytes_are_zero(unit->span_id, CBOX_SPAN_ID_BYTES)
+		) {
+			unit->has_span = true;
+		} else {
+			memset(unit->span_id, 0, CBOX_SPAN_ID_BYTES);
+			unit->has_span = false;
+		}
 	}
 }
 
@@ -847,10 +862,14 @@ static bool cbox_drain_visit(const cbox_crash_record *record, void *context)
 	if (record->has_trace) {
 		cbox_hex_encode(record->trace_id, CBOX_TRACE_ID_BYTES, hex);
 		add_assoc_stringl(&entry, "trace_id", hex, CBOX_TRACE_ID_BYTES * 2);
+	} else {
+		add_assoc_null(&entry, "trace_id");
+	}
+
+	if (record->has_span) {
 		cbox_hex_encode(record->span_id, CBOX_SPAN_ID_BYTES, hex);
 		add_assoc_stringl(&entry, "span_id", hex, CBOX_SPAN_ID_BYTES * 2);
 	} else {
-		add_assoc_null(&entry, "trace_id");
 		add_assoc_null(&entry, "span_id");
 	}
 

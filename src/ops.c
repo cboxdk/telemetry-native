@@ -18,7 +18,18 @@ const char *cbox_op_name(cbox_op_type type)
 
 void cbox_ops_reset(cbox_op_state *state)
 {
+	uint32_t generation = state->generation + 1;
+
 	memset(state, 0, sizeof(*state));
+
+	/*
+	 * Survives the reset so tokens opened in the previous unit can be
+	 * recognised and ignored. A hooked call that is still running when a unit
+	 * ends — a cURL write callback that finishes one unit and starts the next —
+	 * would otherwise book its duration against the new unit and free a slot
+	 * that now belongs to somebody else.
+	 */
+	state->generation = generation;
 }
 
 cbox_op_token cbox_ops_begin(cbox_op_state *state, cbox_op_type type, uint64_t now_ns)
@@ -28,6 +39,7 @@ cbox_op_token cbox_ops_begin(cbox_op_state *state, cbox_op_type type, uint64_t n
 	token.type = type;
 	token.start_ns = now_ns;
 	token.slot = CBOX_OP_NO_SLOT;
+	token.generation = state->generation;
 
 	if (type <= CBOX_OP_NONE || type >= CBOX_OP_MAX) {
 		token.type = CBOX_OP_NONE;
@@ -57,6 +69,11 @@ void cbox_ops_end(cbox_op_state *state, cbox_op_token token, uint64_t now_ns)
 	cbox_op_agg *agg;
 
 	if (token.type <= CBOX_OP_NONE || token.type >= CBOX_OP_MAX) {
+		return;
+	}
+
+	/* Opened in a unit that has since ended — not this unit's measurement. */
+	if (token.generation != state->generation) {
 		return;
 	}
 

@@ -34,6 +34,7 @@ typedef struct _cbox_unit_state {
 	bool     sampled;
 	bool     profiling;
 	bool     has_trace;
+	bool     has_span;
 
 	/*
 	 * An automatic unit was opened by the engine at RINIT rather than by a

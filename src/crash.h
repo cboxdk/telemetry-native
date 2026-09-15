@@ -60,7 +60,7 @@ typedef struct _cbox_crash_record {
 	uint8_t  unit_type;
 	uint8_t  current_op;
 	uint8_t  has_trace;
-	uint8_t  reserved;
+	uint8_t  has_span;
 
 	uint64_t unit_start_ns;
 	uint64_t current_op_start_ns;

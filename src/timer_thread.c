@@ -196,6 +196,8 @@ void cbox_timer_after_fork(void)
 	 * reinitialised rather than reused. The child is single-threaded here, so
 	 * this is the one safe moment to do it.
 	 */
+	bool had_timer = cbox_timer_installed;
+
 	pthread_mutex_init(&cbox_timer_lock, NULL);
 	pthread_cond_init(&cbox_timer_wake, NULL);
 
@@ -205,8 +207,14 @@ void cbox_timer_after_fork(void)
 	cbox_timer_armed_store(false);
 	cbox_timer_period_ns = 0;
 
-	/* Start a fresh sampler thread for this process. */
-	cbox_timer_init();
+	/*
+	 * Start a fresh sampler thread only if the parent had one. A child of a
+	 * process with the profiler disabled — or one where the backend refused to
+	 * start — should not acquire a sampler thread purely by being forked.
+	 */
+	if (had_timer) {
+		cbox_timer_init();
+	}
 }
 
 const char *cbox_timer_backend(void)

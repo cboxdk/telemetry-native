@@ -14,13 +14,13 @@ cbox_telemetry.crash.dir=/tmp/cbox-telemetry-test-multi
 --FILE--
 <?php
 $dir = '/tmp/cbox-telemetry-test-multi';
-$mine = $dir . '/crash-' . getmypid() . '.bin';
+$mine = $dir . '/' . posix_geteuid() . '/crash-' . getmypid() . '.bin';
 
 /*
  * Clear leftovers, but not our own sink: it is already open, and unlinking it
  * would leave this process writing into a file with no name.
  */
-foreach (glob($dir . '/*') ?: [] as $stale) {
+foreach (glob($dir . '/*/*') ?: [] as $stale) {
     if ($stale !== $mine) {
         @unlink($stale);
     }
@@ -75,7 +75,7 @@ foreach ($children as [$process, $pipes]) {
 }
 
 // One file per crashed process, and none for this one.
-$sinks = glob($dir . '/crash-*.bin') ?: [];
+$sinks = glob($dir . '/*/crash-*.bin') ?: [];
 var_dump(count($sinks) === 2);
 
 $records = cbox_telemetry_drain_crashes();
@@ -84,12 +84,12 @@ var_dump($records[0]['signal_name']);
 var_dump($records[0]['trace_id']);
 
 // Consumed sinks are removed, and nothing is left behind.
-var_dump(glob($dir . '/crash-*.bin') ?: []);
+var_dump(glob($dir . '/*/crash-*.bin') ?: []);
 
 // Nothing left to find.
 var_dump(cbox_telemetry_drain_crashes());
 
-foreach (glob($dir . '/*') ?: [] as $leftover) {
+foreach (glob($dir . '/*/*') ?: [] as $leftover) {
     if ($leftover !== $mine) {
         @unlink($leftover);
     }

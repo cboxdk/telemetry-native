@@ -39,7 +39,8 @@ typedef struct _cbox_op_state {
 	cbox_op_agg   agg[CBOX_OP_MAX];
 	cbox_op_frame stack[CBOX_OP_STACK_MAX];
 	uint32_t      depth;
-	uint32_t      overflow; /* begins that got no slot for crash context */
+	uint32_t      overflow;   /* begins that got no slot for crash context */
+	uint32_t      generation; /* bumped on reset; tokens carry it */
 } cbox_op_state;
 
 #define CBOX_OP_NO_SLOT UINT32_MAX
@@ -58,6 +59,7 @@ typedef struct _cbox_op_token {
 	cbox_op_type type;
 	uint64_t     start_ns;
 	uint32_t     slot;
+	uint32_t     generation;
 } cbox_op_token;
 
 /* "pdo.connect", "curl.exec", … — stable wire names, safe to key on. */

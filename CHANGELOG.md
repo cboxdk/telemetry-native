@@ -84,8 +84,8 @@ first tag. What they found, in severity order:
   does not own.
 - **`opcache.preload` could lock every worker out of the crash directory**, by
   creating it as `preload_user` — the same class of failure as the FPM master
-  bug, from a different direction. The directory is now created sticky and
-  world-writable-but-not-listable, with per-file ownership doing the real work.
+  bug, from a different direction. Sinks now live in a per-uid `0700`
+  subdirectory, so several pool users can share one base.
 - **Operation durations were corrupted, not merely lost, by Fibers and by
   overflow.** Pairing matched a begin to whatever was on top of a shared stack,
   so two Fibers timing cURL calls popped each other's frames. Pairs are now
@@ -111,6 +111,57 @@ period, the crash-handler safety story still described a descriptor opened in
 advance, `begin()` returning 0 was documented as covering cases it never did,
 and KNOWN-ISSUES both understated how often the macOS crash happens and
 explained it with a mechanism that does not hold.
+
+### Fixed after the verification round
+
+A second pass, aimed at stability, security, resources and performance, with
+the fixes above already in place:
+
+- **The "sticky directory" fix was not defensible and is gone.** Accepting a
+  crash directory owned by another user because it was sticky protected the
+  wrong thing: sticky stops *other* users removing entries, but the directory's
+  own owner can always remove them, so whoever won the race to create the base
+  could delete or rename every crash record on the host. A base owned by
+  someone else is now refused unless that someone is root and the directory
+  follows the `/tmp` contract. Each uid gets a private `0700` subdirectory
+  under it — verified in a container with two real users, where the attacker
+  cannot reach the victim's records and a hijacked base fails closed.
+- **The directory mode was never what it claimed to be.** `mkdir`'s mode is
+  masked by the umask, so the `01733` the code asked for was created `01711`
+  under the usual `022` — which locked out exactly the second pool user the
+  mode existed to admit. Modes are now forced with `chmod` after `mkdir`.
+- **A drain that ran out of budget made no progress.** Draining re-read each
+  sink from the start and unlinked it only after reaching the end, so a sink
+  holding more records than one call's `max` — or larger than the 4 MB read cap
+  — returned the same records on every call and its inode was never reclaimed.
+  What has been handed over is now discarded, which is safe here precisely
+  because these sinks belong to processes that have already exited.
+- **A planted FIFO could stall a crashing worker.** The handler's own `open()`
+  lacked the `O_NONBLOCK` the drain side already had.
+- **The drain could still skip past a shorter foreign record**, because the
+  scan advanced by our own record length rather than by the length the record
+  itself declares.
+- **An operation token could be honoured after its unit ended**, pairing a
+  begin from one unit with an end in the next. Tokens now carry a generation
+  that a reset bumps.
+- **The duration cap was still ~6× late on native-heavy work.** Driving it by
+  interrupts fixed the starvation case but not this one: interrupts only
+  advance at VM safe points, and a loop inside one long internal call reaches
+  them slowly — measured 6.0 s against a 1 s cap. It now fires on interrupts
+  *or* accumulated ticks, whichever comes first, and the same workload caps at
+  1.04 s.
+- **A forked child could acquire a sampler thread its parent never had**, on
+  the fallback backend, including when the profiler was disabled outright.
+- Smaller: an undecodable `span_id` is now reported as absent rather than as
+  sixteen zeros, and a crash while a hooked operation was in flight outside a
+  unit recorded the closing breadcrumb without saying which operation it was.
+
+Documented rather than fixed: because the handlers are installed with
+`SA_NODEFER`, a core dump records the `raise()` rather than the faulting
+instruction, and a storm of three or more identical fatal signals within a few
+milliseconds can cost the record while still exiting cleanly. Both are the
+right side of the trade against a process that hangs forever, and both are now
+written down.
 
 ### Fixed before the first release
 
