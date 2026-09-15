@@ -20,7 +20,6 @@ jobs:
     name: "${{ matrix.php }} · ${{ matrix.target.arch }} · ${{ matrix.target.libc }}"
     runs-on: ${{ matrix.target.runner }}
     timeout-minutes: 20
-    container: php:${{ matrix.php }}-${{ matrix.target.image_suffix }}
 
     strategy:
       fail-fast: false
@@ -38,55 +37,65 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build tools
-        run: |
-          if [ -f /etc/alpine-release ]; then
-            apk add --no-cache autoconf gcc g++ make libc-dev linux-headers tar
-          else
-            apt-get update -qq
-            apt-get install -y -qq $PHPIZE_DEPS
-          fi
-
-      - name: Build
-        run: |
-          phpize
-          ./configure --enable-cbox-telemetry
-          make -j"$(nproc)"
-          test -f modules/cbox_telemetry.so
-
-      - name: Verify it loads and reports the right build
-        run: |
-          php -d extension="$PWD/modules/cbox_telemetry.so" -r '
-            $s = cbox_telemetry_status();
-            if ($s["thread_safe"]) { fwrite(STDERR, "unexpected ZTS build\n"); exit(1); }
-            printf("%s on php %s, timer=%s%s", cbox_telemetry_version(), PHP_VERSION, $s["timer_backend"], PHP_EOL);
-          '
-
-      - name: Package for PIE
+      # Deliberately not `container:`. GitHub cannot run JavaScript actions
+      # inside an Alpine container on arm64 runners ("only supported on x64
+      # Linux runners"), so checkout fails before the build starts. Driving the
+      # image with docker run keeps all twelve targets identical instead of
+      # special-casing three of them.
+      - name: Build and package
+        env:
+          IMAGE: php:${{ matrix.php }}-${{ matrix.target.image_suffix }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          PHP_SERIES: ${{ matrix.php }}
+          ARCH: ${{ matrix.target.arch }}
+          LIBC: ${{ matrix.target.libc }}
         run: |
           set -eux
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          strip --strip-unneeded modules/cbox_telemetry.so || true
+          mkdir -p dist
+          docker run --rm \
+            -v "$PWD:/src" \
+            -e TAG -e PHP_SERIES -e ARCH -e LIBC \
+            -w /src "$IMAGE" sh -eux -c '
+              if [ -f /etc/alpine-release ]; then
+                apk add --no-cache autoconf gcc g++ make libc-dev linux-headers binutils tar
+              else
+                apt-get update -qq
+                apt-get install -y -qq $PHPIZE_DEPS
+              fi
 
-          mkdir -p dist staging
-          # PIE expects <extension-name>.so at the root of the archive.
-          cp modules/cbox_telemetry.so staging/cbox_telemetry.so
+              phpize
+              ./configure --enable-cbox-telemetry
+              make -j"$(nproc)"
+              test -f modules/cbox_telemetry.so
 
-          # php_{name}-{version}_php{maj.min}-{arch}-{os}-{libc}-nts.tgz, lowercased.
-          # Verified against php/pie's PrePackagedBinaryAssetName.
-          base="php_cbox_telemetry-${TAG}_php${{ matrix.php }}-${{ matrix.target.arch }}-linux-${{ matrix.target.libc }}-nts"
-          base=$(echo "$base" | tr '[:upper:]' '[:lower:]')
-          tar -czf "dist/${base}.tgz" -C staging cbox_telemetry.so
+              # Refuse to ship something that does not load, or a ZTS build.
+              php -d extension="$PWD/modules/cbox_telemetry.so" -r "
+                \$s = cbox_telemetry_status();
+                if (\$s[\"thread_safe\"]) { fwrite(STDERR, \"unexpected ZTS build\n\"); exit(1); }
+                printf(\"%s on php %s, timer=%s%s\", cbox_telemetry_version(), PHP_VERSION, \$s[\"timer_backend\"], PHP_EOL);
+              "
 
-          # Composer's pretty version keeps a tag's leading "v", so that is the
-          # name PIE asks for. Publish the bare-version spelling too, in case a
-          # release is ever cut without the prefix — it costs one copy.
-          if [ "${TAG#v}" != "$TAG" ]; then
-            bare=$(echo "php_cbox_telemetry-${TAG#v}_php${{ matrix.php }}-${{ matrix.target.arch }}-linux-${{ matrix.target.libc }}-nts" | tr '[:upper:]' '[:lower:]')
-            cp "dist/${base}.tgz" "dist/${bare}.tgz"
-          fi
+              strip --strip-unneeded modules/cbox_telemetry.so
 
-          ls -l dist/
+              rm -rf staging && mkdir -p staging dist
+              # PIE expects <extension-name>.so at the root of the archive.
+              cp modules/cbox_telemetry.so staging/cbox_telemetry.so
+
+              # php_{name}-{version}_php{maj.min}-{arch}-{os}-{libc}-nts.tgz,
+              # lowercased. Verified against php/pie PrePackagedBinaryAssetName.
+              base=$(echo "php_cbox_telemetry-${TAG}_php${PHP_SERIES}-${ARCH}-linux-${LIBC}-nts" | tr "[:upper:]" "[:lower:]")
+              tar -czf "dist/${base}.tgz" -C staging cbox_telemetry.so
+
+              # Composer keeps a tag,s leading "v" in the pretty version, so that
+              # is what PIE asks for. Publish the bare spelling too, as cheap
+              # insurance against a release cut without the prefix.
+              case "$TAG" in
+                v*) bare=$(echo "php_cbox_telemetry-${TAG#v}_php${PHP_SERIES}-${ARCH}-linux-${LIBC}-nts" | tr "[:upper:]" "[:lower:]")
+                    cp "dist/${base}.tgz" "dist/${bare}.tgz" ;;
+              esac
+
+              ls -l dist/
+            '
 
       - uses: actions/upload-artifact@v4
         with:
