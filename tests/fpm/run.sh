@@ -96,17 +96,19 @@ ok "crash dir created by the worker, owned by $DIR_OWNER"
 WORKER_PID=$(echo "$FIRST" | sed 's/.*"pid":\([0-9]*\).*/\1/')
 # json_encode escapes forward slashes.
 SINK=$(echo "$FIRST" | sed 's/.*"path":"\([^"]*\)".*/\1/' | sed 's|\\/|/|g')
-[ -f "$SINK" ] || fail "worker sink $SINK does not exist"
-SINK_OWNER=$(stat -c '%U' "$SINK")
-[ "$SINK_OWNER" = "www-data" ] || fail "sink owned by $SINK_OWNER"
-ok "worker $WORKER_PID has its own sink, owned by $SINK_OWNER"
+# Nothing is written until a process actually crashes, so there must be no
+# file here yet — an empty sink per worker would be litter, not telemetry.
+[ -f "$SINK" ] && fail "a healthy worker left a sink behind: $SINK"
+ok "worker $WORKER_PID reserved $SINK without creating it"
 
 # Kill that worker the way a native segfault would.
 kill -ABRT "$WORKER_PID" 2>/dev/null || fail "could not signal worker $WORKER_PID"
 sleep 2
 
 [ -f "$SINK" ] || fail "no crash record left behind by the dead worker"
-ok "dead worker left a record ($(stat -c '%s' "$SINK") bytes)"
+SINK_OWNER=$(stat -c '%U' "$SINK")
+[ "$SINK_OWNER" = "www-data" ] || fail "record owned by $SINK_OWNER, not the worker user"
+ok "dead worker left a record ($(stat -c '%s' "$SINK") bytes, owned by $SINK_OWNER)"
 
 # FPM replaces the worker; a *different* worker must be able to drain it.
 DRAINED=$(request /www/drain.php)
@@ -119,11 +121,11 @@ AGAIN=$(request /www/drain.php)
 echo "$AGAIN" | grep -q '"count":0' || fail "record was reported twice: $AGAIN"
 ok "draining consumes: the record is not reported again"
 
-# Live workers' sinks must survive the drain, or the next crash goes nowhere.
+# A live worker can still record a crash after the drain: it has a path
+# reserved, and the handler creates the file when it needs it.
 LIVE=$(request /www/status.php)
-LIVE_SINK=$(echo "$LIVE" | sed 's/.*"path":"\([^"]*\)".*/\1/' | sed 's|\\/|/|g')
-[ -f "$LIVE_SINK" ] || fail "a live worker's sink was removed by the drain"
-ok "live workers keep their sinks"
+echo "$LIVE" | grep -q '"recorder":"armed"' || fail "recorder not armed after a drain: $LIVE"
+ok "a replacement worker is still armed after the drain"
 
 echo
 echo "ALL FPM CHECKS PASSED"

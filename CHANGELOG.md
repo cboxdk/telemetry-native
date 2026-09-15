@@ -42,6 +42,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cbox_telemetry_status`, `cbox_telemetry_begin`, `cbox_telemetry_finish`,
   `cbox_telemetry_drain_crashes`.
 
+### Fixed before the first release
+
+- **A drain could delete crash records nobody had read.** When the caller's
+  record budget ran out mid-file, the file was unlinked anyway. It is now
+  removed only once it has been read to the end.
+- **`auto_max_ms` was never clamped**, so `0` silently disabled the safety
+  valve and a negative value wrapped into a deadline centuries away — in the
+  one setting whose entire job is to stop an unattended unit sampling forever.
+- **Crash sinks are created on a crash, not on every request.** Every process
+  used to leave a zero-byte file behind; on a recycling FPM pool that is
+  thousands of empty files a day in a shared directory. The handler creates the
+  file itself, which is safe because `open()` and `write()` are.
+- **`profiler_status` said `unknown`** when the extension was disabled outright,
+  which is the one case where the answer is obvious.
+
 ### Platform safety
 
 - **Profiling is disabled by default where there is no per-thread CPU timer**

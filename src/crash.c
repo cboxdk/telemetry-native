@@ -135,6 +135,22 @@ static void cbox_crash_handler(int sig, siginfo_t *info, void *context)
 
 	cbox_crash_in_progress = 1;
 
+	/*
+	 * Open here rather than at request start. Creating the file up front means
+	 * every process that never crashes still leaves an empty one behind — one
+	 * per worker lifetime, which on a recycling FPM pool is thousands a day of
+	 * litter in a shared directory. open() and write() are both async-signal-
+	 * safe; the path was built outside signal context precisely so that
+	 * snprintf, which is not, never runs here.
+	 */
+	if (cbox_crash_fd < 0 && cbox_crash_path[0] != '\0') {
+		cbox_crash_fd = open(
+			cbox_crash_path,
+			O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW,
+			0600
+		);
+	}
+
 	if (cbox_crash_fd >= 0) {
 		record->signal = (uint32_t) sig;
 		record->si_code = info != NULL ? (int32_t) info->si_code : 0;
@@ -278,16 +294,25 @@ void cbox_crash_open_sink(void)
 		return;
 	}
 
-	/* Already open for this process — the common case on every request. */
-	if (cbox_crash_fd >= 0 && cbox_crash_sink_pid == pid) {
+	/* Already prepared for this process — the common case on every request. */
+	if (cbox_crash_sink_pid == pid && cbox_crash_path[0] != '\0') {
 		return;
 	}
 
+	/* A descriptor inherited across fork belongs to the parent's file. */
 	if (cbox_crash_fd >= 0) {
 		close(cbox_crash_fd);
 		cbox_crash_fd = -1;
 	}
 
+	cbox_crash_path[0] = '\0';
+	cbox_crash_sink_pid = 0;
+
+	/*
+	 * The directory is created now, under the identity that will write into it.
+	 * The file is not: it is created by the handler, if there is ever anything
+	 * to put in it.
+	 */
 	if (!cbox_crash_prepare_directory(cbox_crash_dir)) {
 		cbox_crash_current_status = CBOX_CRASH_NO_DIRECTORY;
 		return;
@@ -298,15 +323,14 @@ void cbox_crash_open_sink(void)
 		return;
 	}
 
-	cbox_crash_fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
-
-	if (cbox_crash_fd < 0) {
+	/* Check we could write there, without leaving anything behind. */
+	if (access(cbox_crash_dir, W_OK | X_OK) != 0) {
 		cbox_crash_current_status = CBOX_CRASH_NO_SINK;
 		return;
 	}
 
-	cbox_crash_sink_pid = pid;
 	memcpy(cbox_crash_path, path, sizeof(path));
+	cbox_crash_sink_pid = pid;
 	cbox_crash_current_status = CBOX_CRASH_ARMED;
 }
 
@@ -475,13 +499,16 @@ static int cbox_crash_drain_file(
 	uint32_t             max,
 	cbox_crash_visit_fn  visit,
 	void                *context,
-	bool                *stop
+	bool                *stop,
+	bool                *exhausted
 ) {
 	int fd, visited = 0;
 	char *buffer;
 	ssize_t got;
 	size_t size, offset = 0;
 	struct stat info;
+
+	*exhausted = false;
 
 	fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
 
@@ -491,6 +518,7 @@ static int cbox_crash_drain_file(
 
 	if (fstat(fd, &info) != 0 || info.st_size <= 0) {
 		close(fd);
+		*exhausted = true;
 		return 0;
 	}
 
@@ -512,6 +540,7 @@ static int cbox_crash_drain_file(
 
 	if (got <= 0) {
 		free(buffer);
+		*exhausted = got == 0;
 		return got == 0 ? 0 : -1;
 	}
 
@@ -534,6 +563,12 @@ static int cbox_crash_drain_file(
 			break;
 		}
 	}
+
+	/*
+	 * Only true when the whole file was consumed. Stopping on the caller's
+	 * budget leaves records behind, and the file must survive to hold them.
+	 */
+	*exhausted = offset + sizeof(cbox_crash_record) > size;
 
 	free(buffer);
 
@@ -561,6 +596,7 @@ int cbox_crash_drain(const char *dir, uint32_t max, cbox_crash_visit_fn visit, v
 	struct dirent *entry;
 	int visited = 0;
 	bool stop = false;
+	bool exhausted = false;
 	pid_t self = getpid();
 	size_t prefix_len = sizeof(CBOX_CRASH_FILE_PREFIX) - 1;
 
@@ -599,17 +635,19 @@ int cbox_crash_drain(const char *dir, uint32_t max, cbox_crash_visit_fn visit, v
 			continue;
 		}
 
-		found = cbox_crash_drain_file(path, max - (uint32_t) visited, visit, context, &stop);
+		exhausted = false;
+		found = cbox_crash_drain_file(path, max - (uint32_t) visited, visit, context, &stop, &exhausted);
 
 		if (found >= 0) {
 			visited += found;
 
 			/*
-			 * Only once the owner is gone and we have read the file through.
-			 * If the visitor stopped early there may be records left, so keep
-			 * the file for the next drain.
+			 * Only once the owner is gone AND the file has been read through.
+			 * Deleting it because the caller's budget ran out would throw away
+			 * records nobody has seen — the one thing a crash sink must never
+			 * do.
 			 */
-			if (!stop) {
+			if (exhausted) {
 				unlink(path);
 			}
 		}

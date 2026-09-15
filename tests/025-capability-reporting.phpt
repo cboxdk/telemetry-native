@@ -42,8 +42,9 @@ var_dump($detail['curl']['requested'], $detail['curl']['active']);
 // The functions actually wrapped are named.
 var_dump(in_array('PDO::__construct', $status['hooks_installed'], true));
 
-// And the profiler says why it is or is not running.
-var_dump($status['profiler_status']);
+// And the profiler says why it is or is not running. The exact wording differs
+// per backend — what matters is that it is a reason, not a bare boolean.
+var_dump(str_starts_with($status['profiler_status'], 'ready'));
 ?>
 --EXPECT--
 bool(true)
@@ -56,4 +57,4 @@ bool(false)
 bool(false)
 bool(false)
 bool(true)
-string(5) "ready"
+bool(true)

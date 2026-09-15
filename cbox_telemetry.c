@@ -880,6 +880,8 @@ PHP_MINIT_FUNCTION(cbox_telemetry)
 	REGISTER_INI_ENTRIES();
 
 	if (!CBOX_G(enabled)) {
+		/* Still answer "why is nothing happening" rather than "unknown". */
+		CBOX_G(profiler_reason) = "disabled: the extension is off (cbox_telemetry.enabled=0)";
 		return SUCCESS;
 	}
 
@@ -888,6 +890,13 @@ PHP_MINIT_FUNCTION(cbox_telemetry)
 	CBOX_G(max_frames) = cbox_clamp(CBOX_G(max_frames), CBOX_FRAMES_MIN, CBOX_FRAMES_MAX);
 	CBOX_G(max_nodes) = cbox_clamp(CBOX_G(max_nodes), CBOX_NODES_MIN, CBOX_NODES_MAX);
 	CBOX_G(crumb_capacity) = cbox_clamp(CBOX_G(crumb_capacity), CBOX_CRUMBS_MIN, CBOX_CRUMBS_MAX);
+	/*
+	 * Clamped like everything else. Left unclamped, auto_max_ms=0 silently
+	 * turns the safety valve off entirely and a negative value wraps into a
+	 * deadline centuries away — in the one setting whose whole job is to stop
+	 * an unattended unit sampling forever.
+	 */
+	CBOX_G(auto_max_ms) = cbox_clamp(CBOX_G(auto_max_ms), CBOX_AUTO_MAX_MS_MIN, CBOX_AUTO_MAX_MS_MAX);
 
 	/* Room for one name and one file path per frame, generously rounded. */
 	arena_bytes = (size_t) CBOX_G(max_frames) * 256u;

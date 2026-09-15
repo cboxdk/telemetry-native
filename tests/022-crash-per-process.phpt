@@ -1,5 +1,5 @@
 --TEST--
-cbox_telemetry: each process writes its own crash sink, and live ones are left alone
+cbox_telemetry: a sink exists only for a process that actually crashed
 --EXTENSIONS--
 cbox_telemetry
 --SKIPIF--
@@ -26,8 +26,10 @@ foreach (glob($dir . '/*') ?: [] as $stale) {
     }
 }
 
-// This process has its own sink, named for its pid.
+// The path is reserved for this process, but nothing is written until there is
+// something to write — a process that never crashes leaves no file behind.
 var_dump(cbox_telemetry_status()['crash_path'] === $mine);
+var_dump(file_exists($mine));
 
 function cbox_spawn_crasher(string $dir): array
 {
@@ -72,19 +74,17 @@ foreach ($children as [$process, $pipes]) {
     proc_close($process);
 }
 
-// One file per crashed process, plus our own.
+// One file per crashed process, and none for this one.
 $sinks = glob($dir . '/crash-*.bin') ?: [];
-var_dump(count($sinks) === 3);
+var_dump(count($sinks) === 2);
 
 $records = cbox_telemetry_drain_crashes();
 var_dump(count($records) === 2);
 var_dump($records[0]['signal_name']);
 var_dump($records[0]['trace_id']);
 
-// Dead processes' sinks are removed; ours is still here, untouched.
-$after = glob($dir . '/crash-*.bin') ?: [];
-var_dump(count($after) === 1);
-var_dump($after[0] === $mine);
+// Consumed sinks are removed, and nothing is left behind.
+var_dump(glob($dir . '/crash-*.bin') ?: []);
 
 // Nothing left to find.
 var_dump(cbox_telemetry_drain_crashes());
@@ -97,11 +97,12 @@ foreach (glob($dir . '/*') ?: [] as $leftover) {
 ?>
 --EXPECT--
 bool(true)
+bool(false)
 bool(true)
 bool(true)
 string(7) "SIGABRT"
 string(32) "4bf92f3577b34da6a3ce929d0e0e4736"
-bool(true)
-bool(true)
+array(0) {
+}
 array(0) {
 }

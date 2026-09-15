@@ -83,8 +83,9 @@ replaced.
 
 ## One sink per process
 
-Each process writes its own file, `crash-<pid>.bin`, opened on its first
-request rather than at module startup. Both halves of that matter.
+Each process writes its own file, `crash-<pid>.bin`. The path is reserved on
+the process's first request; the file itself is created by the handler, if
+there is ever anything to put in it. Three things follow from that.
 
 **Per process, because draining a shared file is not safe.** Compacting one
 file means truncating it, and anything appended between the last read and the
@@ -95,13 +96,20 @@ appends nothing, so its file can be read whole and removed. Live processes'
 sinks are skipped entirely, because unlinking one would leave its owner writing
 into a file with no name and lose the very crash it was there to catch.
 
-**On first request, because of PHP-FPM.** The master starts as root and runs
-module startup; workers then drop to another user. A sink created at startup
-belongs to root with mode 0700, and every worker is locked out of it for the
-life of the pool — the recorder reports `unavailable: directory` and records
-nothing. Opening on the first request means the file belongs to whoever
-actually writes it. `tests/fpm/run.sh` exercises exactly this against a real
-FPM master with a non-root pool.
+**Prepared on the first request, because of PHP-FPM.** The master starts as
+root and runs module startup; workers then drop to another user. A directory
+created at startup belongs to root with mode 0700, and every worker is locked
+out of it for the life of the pool — the recorder reports
+`unavailable: directory` and records nothing. Preparing on the first request
+means it belongs to whoever actually writes it. `tests/fpm/run.sh` exercises
+exactly this against a real FPM master with a non-root pool.
+
+**Created only on a crash, because empty files are litter.** Creating the sink
+up front leaves a zero-byte file behind for every process that never crashes —
+one per worker lifetime, which on a recycling FPM pool is thousands a day in a
+shared directory. `open()` and `write()` are both async-signal-safe, so the
+handler can create the file itself; the path is built beforehand precisely
+because `snprintf` is not.
 
 The consequence for multi-pool setups: the first pool to serve a request owns
 the directory, and pools running as a different user will report

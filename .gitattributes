@@ -1,0 +1,20 @@
+# Keep the distributed package to what is needed to build and load the
+# extension. Tests, benchmarks and docs stay in the repository.
+/.github            export-ignore
+/benchmarks         export-ignore
+/docs               export-ignore
+/tests              export-ignore
+/.gitattributes     export-ignore
+/.gitignore         export-ignore
+/AGENTS.md          export-ignore
+/CLAUDE.md          export-ignore
+/CONTRIBUTING.md    export-ignore
+/KNOWN-ISSUES.md    export-ignore
+/llms.txt           export-ignore
+
+# Keep line endings sane for the sources a build touches.
+*.c     text eol=lf
+*.h     text eol=lf
+*.m4    text eol=lf
+*.php   text eol=lf
+*.phpt  text eol=lf
