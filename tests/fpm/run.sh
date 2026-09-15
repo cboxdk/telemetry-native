@@ -9,16 +9,19 @@
 # Run inside a php:*-fpm image: sh tests/fpm/run.sh
 set -e
 
+# Works whether the checkout is bind-mounted at /src or checked out by CI into
+# the workspace — resolve the repo from this script's own location.
+SRC=$(cd "$(dirname "$0")/../.." && pwd)
+
 fail() { echo "FAIL: $*"; exit 1; }
 ok()   { echo "ok: $*"; }
 
 apt-get update -qq >/dev/null 2>&1
 apt-get install -y -qq $PHPIZE_DEPS libfcgi-bin procps >/dev/null 2>&1
 
-cd /src
 rm -rf /build && mkdir -p /build/src && cd /build
-cp /src/config.m4 /src/cbox_telemetry.c /src/cbox_telemetry_arginfo.h /src/cbox_telemetry.stub.php /src/php_cbox_telemetry.h .
-cp /src/src/*.c /src/src/*.h src/
+cp "$SRC"/config.m4 "$SRC"/cbox_telemetry.c "$SRC"/cbox_telemetry_arginfo.h "$SRC"/cbox_telemetry.stub.php "$SRC"/php_cbox_telemetry.h .
+cp "$SRC"/src/*.c "$SRC"/src/*.h src/
 phpize >/dev/null 2>&1
 ./configure --enable-cbox-telemetry >/dev/null 2>&1
 make -j4 >/dev/null 2>&1
