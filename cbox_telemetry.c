@@ -66,10 +66,11 @@ static void cbox_gc_counters(uint64_t *runs, uint64_t *collected)
 
 /* --------------------------------------------------- operation notifications */
 
-void cbox_telemetry_note_op_begin(cbox_op_type type)
+cbox_op_token cbox_telemetry_note_op_begin(cbox_op_type type)
 {
 	uint64_t now = cbox_now_ns();
 	const char *name = cbox_op_name(type);
+	cbox_op_token token;
 
 	/*
 	 * Breadcrumbs are recorded whether or not a unit is active — a crash
@@ -79,20 +80,26 @@ void cbox_telemetry_note_op_begin(cbox_op_type type)
 	cbox_crumbs_push(&CBOX_G(crumbs), CBOX_CRUMB_OP_BEGIN, (uint8_t) type, name, strlen(name), now);
 
 	if (CBOX_G(unit).handle != 0) {
-		cbox_ops_begin(&CBOX_G(ops), type, now);
+		return cbox_ops_begin(&CBOX_G(ops), type, now);
 	}
+
+	token.type = CBOX_OP_NONE;
+	token.start_ns = now;
+	token.slot = CBOX_OP_NO_SLOT;
+
+	return token;
 }
 
-void cbox_telemetry_note_op_end(cbox_op_type type)
+void cbox_telemetry_note_op_end(cbox_op_token token)
 {
 	uint64_t now = cbox_now_ns();
-	const char *name = cbox_op_name(type);
+	const char *name = cbox_op_name(token.type);
 
 	if (CBOX_G(unit).handle != 0) {
-		cbox_ops_end(&CBOX_G(ops), type, now);
+		cbox_ops_end(&CBOX_G(ops), token, now);
 	}
 
-	cbox_crumbs_push(&CBOX_G(crumbs), CBOX_CRUMB_OP_END, (uint8_t) type, name, strlen(name), now);
+	cbox_crumbs_push(&CBOX_G(crumbs), CBOX_CRUMB_OP_END, (uint8_t) token.type, name, strlen(name), now);
 }
 
 /* ------------------------------------------------------------- profile output */
@@ -295,6 +302,40 @@ static void cbox_detect_fork(void)
 
 /* ----------------------------------------------------------- unit lifecycle */
 
+/*
+ * Context lookups dereference: a caller passing values by reference — an array
+ * built with &$var — otherwise fails every Z_TYPE_P check and the key is
+ * silently ignored.
+ */
+static zval *cbox_context_find(HashTable *context, const char *key, size_t len)
+{
+	zval *value = zend_hash_str_find(context, key, len);
+
+	if (value != NULL) {
+		ZVAL_DEREF(value);
+	}
+
+	return value;
+}
+
+/*
+ * Deliberately narrower than zend_is_true(): on PHP 8.5 a NAN emits
+ * "unexpected NAN value was coerced to bool", and this extension does not get
+ * to make the caller's code emit diagnostics.
+ */
+static bool cbox_context_truthy(const zval *value, bool fallback)
+{
+	switch (Z_TYPE_P(value)) {
+		case IS_TRUE:  return true;
+		case IS_FALSE: return false;
+		case IS_LONG:  return Z_LVAL_P(value) != 0;
+		case IS_STRING:
+			return Z_STRLEN_P(value) != 0
+				&& !(Z_STRLEN_P(value) == 1 && Z_STRVAL_P(value)[0] == '0');
+		default:       return fallback;
+	}
+}
+
 /* Trace ids are optional and independent of how the unit was opened. */
 static void cbox_unit_apply_trace(cbox_unit_state *unit, HashTable *context)
 {
@@ -304,7 +345,7 @@ static void cbox_unit_apply_trace(cbox_unit_state *unit, HashTable *context)
 		return;
 	}
 
-	if ((value = zend_hash_str_find(context, "trace_id", sizeof("trace_id") - 1)) != NULL
+	if ((value = cbox_context_find(context, "trace_id", sizeof("trace_id") - 1)) != NULL
 		&& Z_TYPE_P(value) == IS_STRING
 		&& cbox_hex_decode(Z_STRVAL_P(value), Z_STRLEN_P(value), unit->trace_id, CBOX_TRACE_ID_BYTES)
 		&& !cbox_bytes_are_zero(unit->trace_id, CBOX_TRACE_ID_BYTES)
@@ -312,9 +353,13 @@ static void cbox_unit_apply_trace(cbox_unit_state *unit, HashTable *context)
 		unit->has_trace = true;
 	}
 
-	if ((value = zend_hash_str_find(context, "span_id", sizeof("span_id") - 1)) != NULL
-		&& Z_TYPE_P(value) == IS_STRING) {
-		cbox_hex_decode(Z_STRVAL_P(value), Z_STRLEN_P(value), unit->span_id, CBOX_SPAN_ID_BYTES);
+	if ((value = cbox_context_find(context, "span_id", sizeof("span_id") - 1)) != NULL
+		&& Z_TYPE_P(value) == IS_STRING
+		&& !cbox_hex_decode(Z_STRVAL_P(value), Z_STRLEN_P(value), unit->span_id, CBOX_SPAN_ID_BYTES)
+	) {
+		/* A failed decode leaves a half-written id; an all-zero span id is
+		 * invalid per W3C and a consumer may not check. Report nothing. */
+		memset(unit->span_id, 0, CBOX_SPAN_ID_BYTES);
 	}
 }
 
@@ -393,6 +438,8 @@ PHP_FUNCTION(cbox_telemetry_status)
 
 	ZEND_PARSE_PARAMETERS_NONE();
 
+	cbox_detect_fork();
+
 	array_init(return_value);
 
 	add_assoc_string(return_value, "version", PHP_CBOX_TELEMETRY_VERSION);
@@ -440,9 +487,15 @@ PHP_FUNCTION(cbox_telemetry_status)
 	add_assoc_long(return_value, "arena_peak_bytes", (zend_long) cbox_profiler_arena_peak());
 	add_assoc_long(return_value, "breadcrumbs_written", (zend_long) CBOX_G(crumbs).written);
 
+	/*
+	 * Clamped on the way out. period_us and max_depth are PHP_INI_ALL but are
+	 * only clamped at MINIT, so a runtime ini_set made status() report a value
+	 * the profiler would never use.
+	 */
 	array_init(&limits);
-	add_assoc_long(&limits, "period_us", CBOX_G(period_us));
-	add_assoc_long(&limits, "max_depth", CBOX_G(max_depth));
+	add_assoc_long(&limits, "period_us",
+		cbox_clamp(CBOX_G(period_us), CBOX_PERIOD_US_MIN, CBOX_PERIOD_US_MAX));
+	add_assoc_long(&limits, "max_depth", cbox_clamp(CBOX_G(max_depth), 1, CBOX_DEPTH_MAX));
 	add_assoc_long(&limits, "max_frames", CBOX_G(max_frames));
 	add_assoc_long(&limits, "max_nodes", CBOX_G(max_nodes));
 	add_assoc_long(&limits, "breadcrumbs", (zend_long) CBOX_G(crumbs).capacity);
@@ -504,7 +557,12 @@ PHP_FUNCTION(cbox_telemetry_begin)
 
 	ZEND_PARSE_PARAMETERS_START(0, 1)
 		Z_PARAM_OPTIONAL
-		Z_PARAM_ARRAY_HT_OR_NULL(context)
+		/*
+		 * Not _OR_NULL: the stub declares `array $context = []`, and a debug
+		 * build hard-fails with "Arginfo / zpp mismatch" on begin(null) while
+		 * a release build silently accepts it.
+		 */
+		Z_PARAM_ARRAY_HT(context)
 	ZEND_PARSE_PARAMETERS_END();
 
 	if (!CBOX_G(active) || !CBOX_G(enabled)) {
@@ -514,26 +572,26 @@ PHP_FUNCTION(cbox_telemetry_begin)
 	cbox_detect_fork();
 
 	if (context != NULL) {
-		if ((value = zend_hash_str_find(context, "unit", sizeof("unit") - 1)) != NULL
+		if ((value = cbox_context_find(context, "unit", sizeof("unit") - 1)) != NULL
 			&& Z_TYPE_P(value) == IS_STRING) {
 			type = cbox_unit_type_from(Z_STRVAL_P(value), Z_STRLEN_P(value));
 			explicit_type = true;
 		}
 
-		if ((value = zend_hash_str_find(context, "sampled", sizeof("sampled") - 1)) != NULL) {
-			sampled = zend_is_true(value);
+		if ((value = cbox_context_find(context, "sampled", sizeof("sampled") - 1)) != NULL) {
+			sampled = cbox_context_truthy(value, true);
 		}
 
-		if ((value = zend_hash_str_find(context, "profile", sizeof("profile") - 1)) != NULL) {
-			want_profile = zend_is_true(value);
+		if ((value = cbox_context_find(context, "profile", sizeof("profile") - 1)) != NULL) {
+			want_profile = cbox_context_truthy(value, true);
 		}
 
-		if ((value = zend_hash_str_find(context, "period_us", sizeof("period_us") - 1)) != NULL
+		if ((value = cbox_context_find(context, "period_us", sizeof("period_us") - 1)) != NULL
 			&& Z_TYPE_P(value) == IS_LONG) {
 			period_us = Z_LVAL_P(value);
 		}
 
-		if ((value = zend_hash_str_find(context, "max_depth", sizeof("max_depth") - 1)) != NULL
+		if ((value = cbox_context_find(context, "max_depth", sizeof("max_depth") - 1)) != NULL
 			&& Z_TYPE_P(value) == IS_LONG) {
 			max_depth = Z_LVAL_P(value);
 		}
@@ -573,6 +631,14 @@ PHP_FUNCTION(cbox_telemetry_begin)
 		 * would mean discarding the samples we adopted this unit for.
 		 */
 
+		/*
+		 * It has an owner now, so the automatic deadline no longer applies —
+		 * otherwise an adopted unit running longer than auto_max_ms gets its
+		 * profile silently truncated.
+		 */
+		unit->automatic = true;
+		cbox_profiler_clear_deadline();
+
 		cbox_unit_apply_trace(unit, context);
 
 		RETURN_LONG((zend_long) unit->handle);
@@ -610,6 +676,13 @@ PHP_FUNCTION(cbox_telemetry_finish)
 		Z_PARAM_BOOL(include_profile)
 		Z_PARAM_BOOL(include_stacks)
 	ZEND_PARSE_PARAMETERS_END();
+
+	/*
+	 * A forked child that goes straight here — the documented terminate-hook
+	 * pattern — would otherwise report the parent's inherited unit as its own,
+	 * and the parent would then report the same samples again.
+	 */
+	cbox_detect_fork();
 
 	/*
 	 * Handle 0 means "whichever unit is open". That is what makes automatic
@@ -675,8 +748,14 @@ PHP_FUNCTION(cbox_telemetry_finish)
 	add_assoc_long(&counters, "gc.collected",
 		(zend_long) (gc_collected - CBOX_G(gc_collected_at_begin)));
 	add_assoc_long(&counters, "ops.overflow", (zend_long) ops->overflow);
-	add_assoc_long(&counters, "breadcrumbs.written", (zend_long) CBOX_G(crumbs).written);
-	add_assoc_long(&counters, "arena.peak_bytes", (zend_long) cbox_profiler_arena_peak());
+	/*
+	 * Named _total because they are: the breadcrumb ring deliberately spans
+	 * units, and the arena high-water mark is a process-lifetime figure. Under
+	 * the old per-unit-sounding names a 20,000-unit worker reported 40,801
+	 * breadcrumbs "for this unit".
+	 */
+	add_assoc_long(&counters, "breadcrumbs.written_total", (zend_long) CBOX_G(crumbs).written);
+	add_assoc_long(&counters, "arena.peak_bytes_total", (zend_long) cbox_profiler_arena_peak());
 	add_assoc_long(&counters, "profiler.frame_capacity_hits",
 		(zend_long) cbox_profiler_frame_capacity_hits());
 	add_assoc_long(&counters, "profiler.node_capacity_hits",
@@ -727,8 +806,17 @@ static bool cbox_drain_visit(const cbox_crash_record *record, void *context)
 	{
 		char address[32];
 
-		snprintf(address, sizeof(address), "0x%llx", (unsigned long long) record->fault_address);
-		add_assoc_string(&entry, "fault_address", address);
+		/*
+		 * si_addr is only a fault address for a signal the hardware raised. For
+		 * a sent one the union holds the sender's pid/uid, which is not an
+		 * address and must not be reported as one.
+		 */
+		if (record->si_code > 0) {
+			snprintf(address, sizeof(address), "0x%llx", (unsigned long long) record->fault_address);
+			add_assoc_string(&entry, "fault_address", address);
+		} else {
+			add_assoc_null(&entry, "fault_address");
+		}
 		snprintf(address, sizeof(address), "0x%llx", (unsigned long long) record->program_counter);
 		add_assoc_string(&entry, "program_counter", address);
 		snprintf(address, sizeof(address), "0x%llx", (unsigned long long) record->module_base);

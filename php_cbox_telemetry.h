@@ -83,7 +83,7 @@ ZEND_TSRMLS_CACHE_EXTERN()
 #endif
 
 /* Shared with src/hooks.c. */
-void cbox_telemetry_note_op_begin(cbox_op_type type);
-void cbox_telemetry_note_op_end(cbox_op_type type);
+cbox_op_token cbox_telemetry_note_op_begin(cbox_op_type type);
+void          cbox_telemetry_note_op_end(cbox_op_token token);
 
 #endif /* PHP_CBOX_TELEMETRY_H */

@@ -28,7 +28,7 @@ Linux is the target that matters and cannot be tested natively on a Mac. Use
 Docker for anything you intend to believe:
 
 ```bash
-docker run --rm -v "$PWD":/src:ro php:8.4-cli bash -c '…'   # see .github/workflows/ci.yml
+docker run --rm -v "$PWD":/src:ro php:8.4-cli bash -c '…'   # tests/fpm/run.sh shows the pattern
 ```
 
 ## Architecture map
@@ -51,8 +51,8 @@ src/sigstack.c        one alternate signal stack, shared
 
 ## Invariants — do not break these
 
-1. **The signal handler does two things.** A relaxed atomic add and an atomic
-   store to `EG(vm_interrupt)`. Nothing else is async-signal-safe, so nothing
+1. **The signal handler does almost nothing.** Two relaxed atomic adds and an
+   atomic store to `EG(vm_interrupt)`. Nothing else is async-signal-safe, so nothing
    else goes in there. The stack walk happens at the VM's safe point.
 2. **No Zend allocation per sample.** Names go into the arena, paths into the
    trie. If you find yourself reaching for `emalloc` on the sampling path, the

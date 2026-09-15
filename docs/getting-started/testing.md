@@ -30,9 +30,14 @@ try {
 }
 ```
 
-`$handle !== 0` is the only guard you need. Do not also check
-`extension_loaded()` at the end: the extension can be present and still decline
-to start a unit (disabled by INI, profiler unavailable), and `0` covers that.
+`$handle !== 0` is the only guard you need — you do not also need
+`extension_loaded()` at the end.
+
+Be precise about what `0` means, though: it is returned only when the extension
+is absent or switched off entirely (`cbox_telemetry.enabled=0`). A unit still
+opens when profiling is unavailable — the handle is real, and `finish()` simply
+returns `profiling => false` and `profile => null`. Do not read `0` as "no
+profiling".
 
 ## What the extension guarantees, so you can assert it
 
@@ -63,4 +68,4 @@ make test TESTS=tests/004-accuracy.phpt
 ```
 
 Tests that depend on an optional extension skip rather than fail, so a run with
-16 passed and 1 skipped on a build without OPcache is a clean run.
+some tests skipped on a build without OPcache or pcntl is a clean run.

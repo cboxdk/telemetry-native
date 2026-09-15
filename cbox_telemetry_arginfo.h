@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: ac28133caee7fccc2c54f6b9ea0b3c489f4f0cc2 */
+ * Stub hash: 84c4b38fe2cdc3ed1bbe05cf972cd1246b99e424 */
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_cbox_telemetry_version, 0, 0, IS_STRING, 0)
 ZEND_END_ARG_INFO()

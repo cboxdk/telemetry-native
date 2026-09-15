@@ -37,7 +37,8 @@ observed-call path for **every** call in the process, and that shows up
 immediately on call-heavy PHP.
 
 Median wall time, PHP 8.4 on Linux, 7 iterations per cell, relative to the same
-build with the extension absent:
+build with the extension absent. These numbers are a historical record: the
+observer code is gone, so `benchmarks/` can no longer reproduce the middle row.
 
 | mode | cpu | calls | deep | internal | mixed |
 |---|---|---|---|---|---|
@@ -58,9 +59,9 @@ close call.
 - Hooks install at **RINIT**, not MINIT: `PDO` and `Redis` belong to other
   extensions whose MINIT may run after ours, so the classes do not exist yet
   when ours runs.
-- We install only if the current handler is not already someone else's wrapper
-  we would be cutting out, and on shutdown we restore only if the handler is
-  still ours. Another APM that wraps us afterwards keeps working.
+- On shutdown we restore only if the handler is still ours, so another APM that
+  wrapped us afterwards keeps working. We do *not* refuse to install over
+  someone else's wrapper — we chain through it, which is why that is safe.
 - A `zend_bailout` (fatal error, timeout, `exit()`) longjmps past the end of our
   wrapper, so an operation that dies mid-call never records its end. That costs
   one measurement, never correctness: the nesting stack is bounded and is reset

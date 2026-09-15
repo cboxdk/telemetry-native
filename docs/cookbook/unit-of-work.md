@@ -70,9 +70,10 @@ try {
 }
 ```
 
-`$handle !== 0` is the whole guard. A `0` means "no native telemetry" for any
-reason — extension absent, disabled, profiler unavailable — and the calling code
-does not need to distinguish them.
+`$handle !== 0` is the whole guard. `0` means the extension is absent or
+switched off entirely; it does not mean "no profiling". A unit opens even when
+profiling is unavailable, and `finish()` then returns `profiling => false` with
+`profile => null`.
 
 ## Start profiling always, keep it rarely
 

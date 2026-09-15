@@ -10,8 +10,7 @@
  * no allocation, no Zend API, no PHP callbacks, no locks, no stdio. Everything
  * that *can* be prepared ahead of time is prepared in cbox_crash_install().
  *
- * Records are smaller than PIPE_BUF and written with a single O_APPEND write,
- * so many workers can share one sink without interleaving.
+ * Each process writes its own sink with a single O_APPEND write per record.
  */
 #ifndef CBOX_CRASH_H
 #define CBOX_CRASH_H

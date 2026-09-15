@@ -27,6 +27,13 @@
  */
 typedef char cbox_crash_record_fits[(sizeof(cbox_crash_record) <= 4096) ? 1 : -1];
 
+/* Just the fields every format version is required to start with. */
+typedef struct {
+	uint32_t magic;
+	uint16_t format_version;
+	uint16_t record_len;
+} cbox_crash_record_header_probe;
+
 #define CBOX_CRASH_SIGNALS 4
 #define CBOX_CRASH_PATH_MAX 512
 /* One drain reads at most this much; a runaway sink is truncated, not looped on. */
@@ -149,6 +156,24 @@ static void cbox_crash_handler(int sig, siginfo_t *info, void *context)
 			O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW,
 			0600
 		);
+
+		/*
+		 * Someone may have created this name first — in a shared directory an
+		 * unprivileged user can pre-create it and read whatever we append.
+		 * fstat is async-signal-safe, so the check belongs here.
+		 */
+		if (cbox_crash_fd >= 0) {
+			struct stat sink;
+
+			if (fstat(cbox_crash_fd, &sink) != 0
+				|| !S_ISREG(sink.st_mode)
+				|| sink.st_uid != geteuid()
+				|| sink.st_nlink != 1
+			) {
+				close(cbox_crash_fd);
+				cbox_crash_fd = -1;
+			}
+		}
 	}
 
 	if (cbox_crash_fd >= 0) {
@@ -194,8 +219,6 @@ static void cbox_crash_handler(int sig, siginfo_t *info, void *context)
 	 * on as if nothing had happened.
 	 */
 	for (index = 0; index < CBOX_CRASH_SIGNALS; index++) {
-		bool delivered_by_hardware;
-
 		if (cbox_crash_signals[index] != sig) {
 			continue;
 		}
@@ -213,11 +236,19 @@ static void cbox_crash_handler(int sig, siginfo_t *info, void *context)
 			return;
 		}
 
-		delivered_by_hardware = info != NULL && info->si_code > 0;
-
-		if (!delivered_by_hardware) {
-			raise(sig);
-		}
+		/*
+		 * Always re-raise. An earlier version only did this for signals it
+		 * judged to have been *sent* (si_code <= 0), trusting a fault to
+		 * re-trap on return. That contract is Linux's alone: XNU reports
+		 * si_code = 2 for a kill()-sent SIGSEGV too, so the handler classified
+		 * it as a fault, returned, and the process carried on running after a
+		 * fatal signal — having already written a crash record for it.
+		 *
+		 * Re-raising costs a real fault nothing: it re-traps before the pending
+		 * signal is ever delivered, so the core dump still points at the
+		 * faulting instruction.
+		 */
+		raise(sig);
 
 		return;
 	}
@@ -235,7 +266,18 @@ static bool cbox_crash_prepare_directory(const char *dir)
 		return false;
 	}
 
-	if (mkdir(dir, 0700) == 0) {
+	/*
+	 * 01733: owner rwx, others write+execute, sticky, nobody can list it.
+	 *
+	 * 0700 was wrong in a way that silently disabled the whole feature. With
+	 * opcache.preload the directory is created by the preload subprocess
+	 * running as preload_user, and under FPM with several pools the first pool
+	 * to serve a request owns it — in both cases every other user is locked
+	 * out for the life of the process. Sticky means nobody can remove or
+	 * rename a sink that is not theirs, and the handler refuses to write into
+	 * a file it does not own, so a shared directory stays safe.
+	 */
+	if (mkdir(dir, 01733) == 0) {
 		return true;
 	}
 
@@ -255,7 +297,12 @@ static bool cbox_crash_prepare_directory(const char *dir)
 		return false;
 	}
 
-	if (info.st_uid != geteuid()) {
+	/*
+	 * Ours is always fine. Someone else's is fine only if it is sticky —
+	 * otherwise they could swap our sink for something else between our
+	 * checking it and the handler writing to it.
+	 */
+	if (info.st_uid != geteuid() && (info.st_mode & S_ISVTX) == 0) {
 		return false;
 	}
 
@@ -395,7 +442,15 @@ cbox_crash_status cbox_crash_install(
 
 	memset(&action, 0, sizeof(action));
 	action.sa_sigaction = cbox_crash_handler;
-	action.sa_flags = flags;
+	/*
+	 * SA_NODEFER so the signal stays deliverable while we handle it. Without
+	 * it, a fault *inside* the handler is masked, and Darwin neither
+	 * force-delivers it the way Linux does nor runs the handler again: the
+	 * thread re-executes the faulting instruction forever. The re-entrancy
+	 * latch below is what turns that into a clean _exit, but it only gets a
+	 * chance if the signal can be delivered at all.
+	 */
+	action.sa_flags = flags | SA_NODEFER;
 	sigemptyset(&action.sa_mask);
 
 	for (index = 0; index < CBOX_CRASH_SIGNALS; index++) {
@@ -491,6 +546,21 @@ static bool cbox_crash_record_valid(const cbox_crash_record *record)
 }
 
 /*
+ * A record this build cannot decode, but which is plainly one of ours. The
+ * magic and record_len exist precisely so a different version can be stepped
+ * over by length instead of being treated as garbage — a reader that byte-
+ * resyncs through them and then deletes the file destroys every record written
+ * by the previous version of the extension.
+ */
+static bool cbox_crash_record_foreign_version(const cbox_crash_record *record, size_t remaining)
+{
+	return record->magic == CBOX_CRASH_MAGIC
+		&& record->format_version != CBOX_CRASH_FORMAT_VERSION
+		&& record->record_len >= sizeof(cbox_crash_record_header_probe)
+		&& record->record_len <= remaining;
+}
+
+/*
  * Read one dead process's sink and hand its records over.
  * Returns the number visited, or -1 if the file could not be read.
  */
@@ -500,29 +570,50 @@ static int cbox_crash_drain_file(
 	cbox_crash_visit_fn  visit,
 	void                *context,
 	bool                *stop,
-	bool                *exhausted
+	bool                *consumable
 ) {
 	int fd, visited = 0;
 	char *buffer;
 	ssize_t got;
 	size_t size, offset = 0;
+	off_t file_size;
+	bool foreign_seen = false;
 	struct stat info;
 
-	*exhausted = false;
+	*consumable = false;
 
-	fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+	/*
+	 * O_NONBLOCK because this path is not necessarily ours: a FIFO planted
+	 * under a sink's name would otherwise block open() forever and hang the
+	 * request doing the drain.
+	 */
+	fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
 
 	if (fd < 0) {
 		return -1;
 	}
 
-	if (fstat(fd, &info) != 0 || info.st_size <= 0) {
+	/*
+	 * And only read it if it is a plain file belonging to us. Without this,
+	 * anyone able to write the directory can plant a record and have it
+	 * reported as genuine crash telemetry.
+	 */
+	if (fstat(fd, &info) != 0
+		|| !S_ISREG(info.st_mode)
+		|| info.st_uid != geteuid()
+	) {
 		close(fd);
-		*exhausted = true;
+		return -1;
+	}
+
+	if (info.st_size <= 0) {
+		close(fd);
+		*consumable = true;
 		return 0;
 	}
 
-	size = (size_t) info.st_size;
+	file_size = info.st_size;
+	size = (size_t) file_size;
 
 	if (size > CBOX_CRASH_DRAIN_MAX_BYTES) {
 		size = CBOX_CRASH_DRAIN_MAX_BYTES;
@@ -540,8 +631,7 @@ static int cbox_crash_drain_file(
 
 	if (got <= 0) {
 		free(buffer);
-		*exhausted = got == 0;
-		return got == 0 ? 0 : -1;
+		return -1;
 	}
 
 	size = (size_t) got;
@@ -549,8 +639,15 @@ static int cbox_crash_drain_file(
 	while (offset + sizeof(cbox_crash_record) <= size && (uint32_t) visited < max) {
 		const cbox_crash_record *record = (const cbox_crash_record *) (buffer + offset);
 
+		if (cbox_crash_record_foreign_version(record, size - offset)) {
+			/* Step over it by its own length and keep the file. */
+			foreign_seen = true;
+			offset += record->record_len;
+			continue;
+		}
+
 		if (!cbox_crash_record_valid(record)) {
-			/* Garbage or a format we do not know: resynchronise. */
+			/* Garbage: resynchronise a byte at a time. */
 			offset++;
 			continue;
 		}
@@ -565,10 +662,15 @@ static int cbox_crash_drain_file(
 	}
 
 	/*
-	 * Only true when the whole file was consumed. Stopping on the caller's
-	 * budget leaves records behind, and the file must survive to hold them.
+	 * The file may be removed only when every byte of it was read AND every
+	 * record in it was handed over. Measuring against the *buffer* rather than
+	 * the file was a real bug: a sink larger than the read cap had its tail
+	 * deleted unread. Records this version cannot decode also keep the file,
+	 * so an upgrade cannot destroy what the previous version wrote.
 	 */
-	*exhausted = offset + sizeof(cbox_crash_record) > size;
+	*consumable = !foreign_seen
+		&& (size_t) file_size == size
+		&& offset + sizeof(cbox_crash_record) > size;
 
 	free(buffer);
 
@@ -596,7 +698,7 @@ int cbox_crash_drain(const char *dir, uint32_t max, cbox_crash_visit_fn visit, v
 	struct dirent *entry;
 	int visited = 0;
 	bool stop = false;
-	bool exhausted = false;
+	bool consumable = false;
 	pid_t self = getpid();
 	size_t prefix_len = sizeof(CBOX_CRASH_FILE_PREFIX) - 1;
 
@@ -635,19 +737,19 @@ int cbox_crash_drain(const char *dir, uint32_t max, cbox_crash_visit_fn visit, v
 			continue;
 		}
 
-		exhausted = false;
-		found = cbox_crash_drain_file(path, max - (uint32_t) visited, visit, context, &stop, &exhausted);
+		consumable = false;
+		found = cbox_crash_drain_file(path, max - (uint32_t) visited, visit, context, &stop, &consumable);
 
 		if (found >= 0) {
 			visited += found;
 
 			/*
-			 * Only once the owner is gone AND the file has been read through.
-			 * Deleting it because the caller's budget ran out would throw away
-			 * records nobody has seen — the one thing a crash sink must never
-			 * do.
+			 * Only once the owner is gone AND the whole file has been read AND
+			 * everything in it was handed over. Deleting it because a budget
+			 * ran out, or because part of it was written by another version,
+			 * would throw away records nobody has seen.
 			 */
-			if (exhausted) {
+			if (consumable) {
 				unlink(path);
 			}
 		}

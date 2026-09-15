@@ -9,8 +9,14 @@ Linux — the production target — is unaffected.
 
 On a platform with no `timer_create(CLOCK_THREAD_CPUTIME_ID)` (in practice
 macOS), the profiler falls back to a sampler thread. Interrupting the VM from
-that thread corrupts it: roughly one process in every few hundred dies with
-`SIGSEGV`, in a different place each time.
+that thread corrupts it: processes die with `SIGSEGV`, in a different place each
+time.
+
+How often depends heavily on the workload, and an earlier version of this
+document understated it by quoting only the test suite. Measured since: 7 of 400
+short profiled processes at a 100 µs period; 2 of 3 runs of a fixture that
+defines several hundred functions and recurses 120 deep. "One in a few hundred"
+was true of one workload, not of the platform.
 
 The extension's own crash recorder caught one with the fault address and the
 faulting instruction:
@@ -48,12 +54,21 @@ Linux backend gets for free: a per-thread CPU-time timer only fires while that
 thread is executing PHP, whereas `pthread_kill` can land it anywhere, including
 mid-syscall, inside the allocator, or on a Fiber's stack.
 
-### Why Linux is not affected
+### Why Linux appears unaffected
 
-Linux uses `timer_create(CLOCK_THREAD_CPUTIME_ID)` with `SIGEV_THREAD_ID`. The
-kernel delivers the signal to the PHP thread, only while that thread is on CPU
-running PHP, and the handler sets the interrupt flag from that same thread.
-Nothing here is cross-thread and nothing can arrive at an arbitrary moment.
+Linux uses `timer_create(CLOCK_THREAD_CPUTIME_ID)` with `SIGEV_THREAD_ID`: the
+kernel delivers the signal to the PHP thread itself, and the handler sets the
+interrupt flag from that same thread. Nothing is cross-thread.
+
+An earlier version of this document went further and claimed the timer "only
+fires while that thread is executing PHP". That is wrong, and the correction
+matters because it was load-bearing in the argument: `CLOCK_THREAD_CPUTIME_ID`
+counts system time as well as user time, and the signal lands on an arbitrary
+instruction — inside the allocator, on a Fiber's C stack, in the kernel-entry
+path of a syscall. Nothing about it is restricted to VM-safe points.
+
+So the honest statement is the empirical one below, not a mechanism. Why the
+cross-thread store is so much worse in practice is not established.
 
 Zero occurrences across every Linux run to date: repeated local suite runs on
 Debian glibc and Alpine musl, a Valgrind-clean run, the FPM privilege-separation

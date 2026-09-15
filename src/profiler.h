@@ -46,6 +46,13 @@ void cbox_profiler_uninstall(void);
  */
 int  cbox_profiler_start(uint64_t period_ns, uint32_t max_depth, uint64_t max_duration_ns);
 void cbox_profiler_stop(void);
+
+/*
+ * Drop the duration cap on a running profile. An automatic unit gets a
+ * deadline because nobody may ever close it; once a caller adopts it, it has
+ * an owner and the valve is wrong.
+ */
+void cbox_profiler_clear_deadline(void);
 void cbox_profiler_reset(void);
 bool cbox_profiler_running(void);
 

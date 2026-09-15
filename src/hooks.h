@@ -10,8 +10,8 @@
  * That is a measured decision, not a preference: registering *any* observer
  * puts the whole engine onto its observed-call path, and on call-heavy PHP
  * that measured ~20% slower on every workload we tried, whether or not any
- * observed function was ever called. Swapping the handler of six named
- * functions costs exactly nothing for the other few thousand.
+ * observed function was ever called. Swapping the handler of a
+ * dozen named functions costs exactly nothing for the other few thousand.
  *
  * See docs/decisions/0001-operation-hook-mechanism.md.
  */

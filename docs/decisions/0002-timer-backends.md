@@ -67,7 +67,7 @@ the period and sets the VM interrupt flag, the same way any other thread would.
 | mechanism | `timer_create(CLOCK_THREAD_CPUTIME_ID)`, `SIGEV_THREAD_ID` | timer thread + `nanosleep` |
 | signal | `SIGRTMIN + 4` | none |
 | clock | thread CPU time | wall clock |
-| accuracy | 1 ms requested → 1.00 ms measured | period + scheduling latency |
+| accuracy | one scheduler tick (≈1 ms at `CONFIG_HZ=1000`); finer requests are reported as overruns | period + scheduling latency |
 | status name | `posix-thread-cputime` | `thread-walltime` |
 
 Linux is the production target and gets true CPU-time sampling, accurate to the

@@ -91,12 +91,16 @@ directly" from "most of this is arithmetic because the period is too fine".
 **Everything is bounded.** Frames, call-tree nodes, breadcrumbs, the arena and
 the operation nesting stack all have hard ceilings. Past them the extension
 increments a dropped counter and carries on. It never grows, never blocks and
-never fails the request.
+never fails the request. Resetting between units is cheap but not free: the
+arena is a pointer store, the hash buckets are a memset of roughly 160 KB at
+the default limits.
 
-**The crash handler does nothing risky.** It writes one fixed-width record to a
-descriptor opened long beforehand, then restores the previous disposition and
-lets the process die exactly as it would have — core dump and all. No
-allocation, no Zend API, no PHP callbacks, no locks.
+**The crash handler does nothing risky.** It writes one fixed-width record,
+then restores the previous disposition and re-raises, so the process dies
+exactly as it would have — core dump and all. It opens the sink itself, which
+is safe because `open()` and `write()` are both on POSIX's async-signal-safe
+list; the path is built beforehand because `snprintf` is not. No allocation, no
+Zend API, no PHP callbacks, no locks.
 
 ## Measured overhead
 
@@ -109,20 +113,31 @@ reported as medians.
 | | CPU per request | vs baseline | p95 | worker RSS |
 |---|---|---|---|---|
 | baseline, no extension | 2.249 ms | — | 10 ms | 30,065 KB |
-| loaded, never called | 2.238 ms | −0.5% | 9 ms | 30,348 KB |
-| operation hooks armed | 2.279 ms | +1.3% | 9 ms | 30,396 KB |
+| loaded, hooks installed | 2.238 ms | −0.5% | 9 ms | 30,348 KB |
+| + crash recorder armed | 2.279 ms | +1.3% | 9 ms | 30,396 KB |
 | **profiling every request at 1 ms** | 2.336 ms | **+3.9%** | 10 ms | 30,459 KB |
 | profiling every request at 200 µs | 2.414 ms | +7.3% | 10 ms | 30,512 KB |
 
-Read it honestly: having the extension loaded costs nothing measurable, and
-profiling *every* request at 1 ms costs about 4% CPU — a little above the 3%
-this set out to hit. Profiling only sampled requests costs proportionally less,
-and that is the intended deployment.
+Read it honestly. Operation hooks are on by default, so they are installed in
+every row below the baseline — the second and third rows differ only by the
+crash recorder, not by the hooks. The cost of the hooks themselves is inside
+that −0.5%, not isolated anywhere here.
+
+Having the extension loaded costs nothing measurable. Profiling *every* request
+at 1 ms costs about 4% CPU — a little above the 3% this set out to hit.
+Profiling only sampled requests costs proportionally less, and that is the
+intended deployment.
+
+Differences smaller than about 2% are not meaningful at this sample size; only
+the profiling rows are clearly outside the noise.
 
 The 200 µs row is the interesting one. It costs nearly twice as much and buys
-nothing: at that period the kernel cannot deliver, and `timer_overruns` reports
-1,194 of 1,492 ticks skipped. Faster is not more accurate, which is why the
-default is 1 ms.
+nothing: `timer_overruns` reported 1,194 of 1,492 ticks skipped. Linux
+evaluates POSIX CPU timers on the scheduler tick, so on the `CONFIG_HZ=1000`
+kernel these were taken on, roughly 1 ms is the floor no matter what you ask
+for. On a `HZ=250` kernel — the Debian/Ubuntu generic default — even 1 ms would
+overrun three ticks in four. Ask for a period your kernel can actually deliver,
+and read `timer_overruns` to find out what that is.
 
 Memory is flat under sustained load — +8 KB per worker across 60 seconds at
 concurrency 8.
@@ -150,11 +165,21 @@ coexistence is verified rather than assumed:
 | Excimer profiling simultaneously | works — different signals, both collect |
 | PHP-FPM, root master + non-root pool | works; `tests/fpm/run.sh` |
 
-Commercial agents (Datadog, New Relic, Tideways) are **not** in that list. They
-need licences and live accounts, so nothing here has been verified against them
-and this documentation will not pretend otherwise. The extension restores a
-handler only when it is still its own, which is the behaviour that should make
-it a good citizen, but "should" is not "tested".
+| Xdebug (develop, trace) | tried by hand during development; **not** covered by a test |
+| Excimer profiling simultaneously | same — tried once, not covered by a test |
+
+Only the OPcache/JIT and PHP-FPM rows have tests behind them (`tests/011-jit.phpt`,
+`tests/fpm/run.sh`). The other two were checked by hand and could regress
+without anything noticing.
+
+Commercial agents (Datadog, New Relic, Tideways) are **not** in that list at
+all. They need licences and live accounts, so nothing here has been verified
+against them.
+
+One asymmetry worth knowing: *function* handlers are restored only if they are
+still ours, so an agent that wraps us afterwards keeps working. *Signal*
+dispositions are restored unconditionally at shutdown, so a handler installed
+after ours is dropped.
 
 ## Support
 

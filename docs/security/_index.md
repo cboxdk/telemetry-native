@@ -16,8 +16,12 @@ The short version: this extension collects names and numbers, never values.
   overflow counts, arena high-water mark.
 - Breadcrumbs whose labels are operation and unit type names, truncated to
   48 bytes at write time.
-- In crash records: a signal number, a pid, a timestamp, and the trace and span
-  ids the caller supplied.
+- In crash records: a signal number and `si_code`, a pid, a timestamp, the
+  trace and span ids the caller supplied, and — for diagnosing the crash itself
+  — three raw memory addresses: the faulting address, the program counter, and
+  where this extension is mapped. Those are machine addresses rather than
+  application data, but they do describe the process's memory layout, so keep
+  crash records inside your own infrastructure.
 
 ## Not collected
 

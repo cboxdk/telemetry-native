@@ -25,8 +25,18 @@ The two fields worth reading first:
 [timer_cpu_time] => 1
 ```
 
-`thread-walltime` instead means you are on a fallback backend (macOS) that
-samples wall clock. Fine for development, not a production target.
+`thread-walltime` instead means you are on a fallback backend (macOS). Sampling
+is **off by default** there, because interrupting the VM from a sampler thread
+can corrupt it — so the profile in the next section will come back `null` unless
+you opt in:
+
+```ini
+cbox_telemetry.profiler.allow_fallback_backend = 1
+```
+
+Read [known issues](../KNOWN-ISSUES.md) before you do. Everything else — native
+operation timing, counters, breadcrumbs, the crash recorder — works there
+without the flag.
 
 ## Profile something
 

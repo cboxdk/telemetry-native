@@ -39,15 +39,33 @@ typedef struct _cbox_op_state {
 	cbox_op_agg   agg[CBOX_OP_MAX];
 	cbox_op_frame stack[CBOX_OP_STACK_MAX];
 	uint32_t      depth;
-	uint32_t      overflow; /* begins dropped because the nesting stack was full */
+	uint32_t      overflow; /* begins that got no slot for crash context */
 } cbox_op_state;
+
+#define CBOX_OP_NO_SLOT UINT32_MAX
+
+/*
+ * Handed back by begin() and given to end(). It carries the start time, so a
+ * pair is matched by the C call frame that opened it rather than by looking at
+ * the top of a shared stack.
+ *
+ * Matching on the stack top was wrong in two ways that both corrupted
+ * durations rather than merely losing them: two Fibers each timing a cURL call
+ * pop each other's frames, and a begin dropped for want of a slot still had its
+ * end consume the frame below it.
+ */
+typedef struct _cbox_op_token {
+	cbox_op_type type;
+	uint64_t     start_ns;
+	uint32_t     slot;
+} cbox_op_token;
 
 /* "pdo.connect", "curl.exec", … — stable wire names, safe to key on. */
 const char *cbox_op_name(cbox_op_type type);
 
 void cbox_ops_reset(cbox_op_state *state);
-void cbox_ops_begin(cbox_op_state *state, cbox_op_type type, uint64_t now_ns);
-void cbox_ops_end(cbox_op_state *state, cbox_op_type type, uint64_t now_ns);
+cbox_op_token cbox_ops_begin(cbox_op_state *state, cbox_op_type type, uint64_t now_ns);
+void cbox_ops_end(cbox_op_state *state, cbox_op_token token, uint64_t now_ns);
 
 /* The innermost in-flight operation, for crash context. CBOX_OP_NONE when idle. */
 cbox_op_type cbox_ops_current(const cbox_op_state *state);

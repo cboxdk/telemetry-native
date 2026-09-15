@@ -68,9 +68,22 @@ static void cbox_timer_chain(int sig, siginfo_t *info, void *context)
 		return;
 	}
 
-	if (cbox_prev_action.sa_handler != SIG_DFL && cbox_prev_action.sa_handler != SIG_IGN) {
-		cbox_prev_action.sa_handler(sig);
+	if (cbox_prev_action.sa_handler == SIG_IGN) {
+		return;
 	}
+
+	if (cbox_prev_action.sa_handler != SIG_DFL) {
+		cbox_prev_action.sa_handler(sig);
+		return;
+	}
+
+	/*
+	 * Default disposition for a real-time signal is to terminate. Returning
+	 * here would swallow it and silently change the process's behaviour for
+	 * anyone else using this signal, so restore and re-raise.
+	 */
+	sigaction(sig, &cbox_prev_action, NULL);
+	raise(sig);
 }
 
 /*

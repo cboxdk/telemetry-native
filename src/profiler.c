@@ -40,13 +40,15 @@ static struct {
 	uint64_t samples;
 	uint64_t dropped;
 	uint64_t deferred;
-	uint64_t deadline_checked_at; /* sample count at the last deadline check */
+	uint64_t interrupts;          /* safe points reached, recorded or not */
+	uint64_t deadline_checked_at; /* interrupt count at the last deadline check */
 	uint64_t deferred_events;
 	uint64_t timer_overruns;
 	uint32_t max_deferred;
 	uint64_t deadline_ns; /* 0 = no limit */
 	uint32_t max_depth;
 	uint32_t truncated_frame;
+	uint32_t engine_frame;
 
 	bool ready;
 	bool running;
@@ -150,6 +152,30 @@ static uint32_t cbox_profiler_frame_for(const zend_execute_data *frame)
 	);
 }
 
+/*
+ * Samples taken when no PHP frame is on the stack — the engine calls the
+ * interrupt with EG(current_execute_data) NULL during shutdown functions and
+ * end-of-request destructors. Booking these on the root sentinel loses them:
+ * they counted towards sample_count but appeared in neither stacks nor
+ * top_functions, so the numbers did not add up.
+ */
+static uint32_t cbox_profiler_engine_frame(void)
+{
+	if (cbox_profiler.engine_frame != CBOX_FRAME_NONE) {
+		return cbox_profiler.engine_frame;
+	}
+
+	cbox_profiler.engine_frame = cbox_frames_intern(
+		&cbox_profiler.frames,
+		&cbox_profiler.arena,
+		"<engine>", 8,
+		NULL, 0,
+		0
+	);
+
+	return cbox_profiler.engine_frame;
+}
+
 static uint32_t cbox_profiler_truncation_frame(void)
 {
 	if (cbox_profiler.truncated_frame != CBOX_FRAME_NONE) {
@@ -233,6 +259,22 @@ static void cbox_profiler_collect(uint32_t weight)
 		}
 	}
 
+	if (depth == 0 && !truncated) {
+		uint32_t engine = cbox_profiler_engine_frame();
+
+		if (engine == CBOX_FRAME_NONE) {
+			cbox_profiler.dropped += weight;
+			return;
+		}
+
+		node = cbox_stacktree_child(&cbox_profiler.tree, node, engine);
+
+		if (node == CBOX_NODE_NONE) {
+			cbox_profiler.dropped += weight;
+			return;
+		}
+	}
+
 	cbox_stacktree_record(&cbox_profiler.tree, node, weight);
 	cbox_profiler.samples += weight;
 }
@@ -243,6 +285,8 @@ static void cbox_profiler_interrupt(zend_execute_data *execute_data)
 	uint32_t deliveries = CBOX_ATOMIC_TAKE(&cbox_pending_deliveries);
 
 	if (pending > 0 && cbox_profiler.running && cbox_profiler.ready) {
+		cbox_profiler.interrupts++;
+
 		/*
 		 * Ticks the kernel counted but never delivered. Nothing was observed
 		 * for these — they say the requested period is finer than the platform
@@ -272,19 +316,20 @@ static void cbox_profiler_interrupt(zend_execute_data *execute_data)
 		cbox_profiler_collect(pending);
 
 		/*
-		 * Check the deadline rarely — once every few hundred samples is plenty
-		 * for a valve measured in seconds, and a clock read on every sample
-		 * would be a real cost at a 100 us period.
+		 * Check the deadline rarely — once every few hundred interrupts is
+		 * plenty for a valve measured in seconds, and a clock read on every
+		 * one would be a real cost at a 100 us period.
 		 *
-		 * Compare against the last checked count rather than testing the
-		 * counter for a round number: samples advances by the number of ticks
-		 * booked at once, so it steps straight over any exact value and the
-		 * check may never fire at all.
+		 * Driven by interrupts, not recorded samples. Samples only advance when
+		 * a sample is actually stored, so once the frame table or trie fills up
+		 * the counter freezes and the valve is starved exactly when it is most
+		 * needed: measured 3.5 seconds against a 1 second cap, with 31,000
+		 * stack walks taken after the deadline had passed.
 		 */
 		if (cbox_profiler.deadline_ns != 0
-			&& cbox_profiler.samples - cbox_profiler.deadline_checked_at >= 512
+			&& cbox_profiler.interrupts - cbox_profiler.deadline_checked_at >= 512
 		) {
-			cbox_profiler.deadline_checked_at = cbox_profiler.samples;
+			cbox_profiler.deadline_checked_at = cbox_profiler.interrupts;
 
 			if (cbox_now_ns() > cbox_profiler.deadline_ns) {
 				cbox_profiler_stop();
@@ -308,6 +353,7 @@ int cbox_profiler_init(uint32_t max_frames, uint32_t max_nodes, size_t arena_byt
 
 	memset(&cbox_profiler, 0, sizeof(cbox_profiler));
 	cbox_profiler.truncated_frame = CBOX_FRAME_NONE;
+	cbox_profiler.engine_frame = CBOX_FRAME_NONE;
 
 	if (cbox_arena_init(&cbox_profiler.arena, arena_bytes) != 0) {
 		return -1;
@@ -413,6 +459,11 @@ void cbox_profiler_stop(void)
 	CBOX_ATOMIC_TAKE(&cbox_pending_deliveries);
 }
 
+void cbox_profiler_clear_deadline(void)
+{
+	cbox_profiler.deadline_ns = 0;
+}
+
 void cbox_profiler_reset(void)
 {
 	if (!cbox_profiler.ready) {
@@ -426,11 +477,13 @@ void cbox_profiler_reset(void)
 	cbox_profiler.samples = 0;
 	cbox_profiler.dropped = 0;
 	cbox_profiler.deferred = 0;
+	cbox_profiler.interrupts = 0;
 	cbox_profiler.deadline_checked_at = 0;
 	cbox_profiler.deferred_events = 0;
 	cbox_profiler.timer_overruns = 0;
 	cbox_profiler.max_deferred = 0;
 	cbox_profiler.truncated_frame = CBOX_FRAME_NONE;
+	cbox_profiler.engine_frame = CBOX_FRAME_NONE;
 	cbox_profiler.capped = false;
 }
 

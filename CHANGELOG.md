@@ -42,6 +42,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cbox_telemetry_status`, `cbox_telemetry_begin`, `cbox_telemetry_finish`,
   `cbox_telemetry_drain_crashes`.
 
+### Fixed after the pre-release review
+
+Seven reviewers — six specialists and an outside model — went at this before the
+first tag. What they found, in severity order:
+
+- **PIE would never have used the prebuilt binaries.** `download-url-method`
+  was in composer's `extra` block; PIE reads it from `php-ext`, and with it
+  absent returns `[composer-default]`, so every install compiled from source
+  and all twenty-four release assets were dead weight. The list form
+  `["pre-packaged-binary", "composer-default"]` is what keeps a target with no
+  asset — macOS, a debug build — falling back to source instead of failing.
+- **The first release would have had empty notes.** The changelog range ran
+  from `[Unreleased]` to the next heading, which at release time *is* the
+  version heading.
+- **A forked child reported the parent's profile as its own.** `finish()` and
+  `status()` never checked for a fork, so a child following the documented
+  terminate-hook pattern returned the parent's samples and the parent then
+  reported the same ones again.
+- **The automatic-unit duration cap could be starved forever.** The deadline
+  was checked every 512 *recorded* samples, and once the frame table or trie
+  filled up, samples stopped advancing while stack walks did not: measured 3.5
+  seconds against a one-second cap with 31,000 walks taken after it expired.
+  Now driven by interrupts.
+- **A process could survive a fatal signal.** The handler treated `si_code > 0`
+  as "hardware, will re-trap on return" — true on Linux, false on Darwin, which
+  reports the same code for a `kill()`-sent SIGSEGV. It now always re-raises.
+- **A fault inside the handler could hang the process forever.** Without
+  `SA_NODEFER` the signal is masked while handling, and Darwin neither
+  force-delivers nor re-enters, so the thread re-executed the faulting
+  instruction indefinitely.
+- **The drain could still delete unread records**, because "read to the end"
+  was measured against the truncated read buffer rather than the file, and
+  records written by a different format version were resynced past as garbage
+  and then deleted — an upgrade would have destroyed everything not yet
+  drained.
+- **The drain trusted the directory.** A FIFO planted under a sink name hung
+  the draining request; a directory another user could write let them inject
+  crash telemetry that was reported as genuine. Both sides now require a
+  regular file owned by us, and the handler refuses to write into a sink it
+  does not own.
+- **`opcache.preload` could lock every worker out of the crash directory**, by
+  creating it as `preload_user` — the same class of failure as the FPM master
+  bug, from a different direction. The directory is now created sticky and
+  world-writable-but-not-listable, with per-file ownership doing the real work.
+- **Operation durations were corrupted, not merely lost, by Fibers and by
+  overflow.** Pairing matched a begin to whatever was on top of a shared stack,
+  so two Fibers timing cURL calls popped each other's frames. Pairs are now
+  matched by a token held in the C call frame that opened them.
+- **PDO's driver subclasses bypassed instrumentation.** `Pdo\Sqlite::connect()`
+  and friends hold their own copy of the inherited method, so patching
+  `PDO::connect` never reached them.
+- **`begin(null)` was an arginfo/ZPP mismatch** — silently accepted by a
+  release build, an `E_CORE_ERROR` on a debug build.
+- Smaller: a real-time signal we did not send was swallowed instead of being
+  re-raised; samples taken with no PHP frame on the stack were booked on the
+  root sentinel and vanished from the profile they were counted in; context
+  values passed by reference were ignored; an undecodable `span_id` was emitted
+  as all zeros; `NAN` in the context made *the caller's* code emit a warning;
+  `status()['limits']` reported values the profiler would never use; two
+  process-lifetime counters were named as though they were per-unit and are now
+  `breadcrumbs.written_total` and `arena.peak_bytes_total`.
+
+Documentation was corrected in the same pass: the overhead table's middle rows
+were labelled as isolating the operation hooks when they do not, the sampling
+accuracy figures are a property of the kernel tick rather than of the requested
+period, the crash-handler safety story still described a descriptor opened in
+advance, `begin()` returning 0 was documented as covering cases it never did,
+and KNOWN-ISSUES both understated how often the macOS crash happens and
+explained it with a mechanism that does not hold.
+
 ### Fixed before the first release
 
 - **A drain could delete crash records nobody had read.** When the caller's

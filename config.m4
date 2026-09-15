@@ -1,8 +1,9 @@
 dnl config.m4 for extension cbox_telemetry
 dnl
 dnl Linux is the supported production target (per-thread CPU timers via
-dnl timer_create + SIGEV_THREAD_ID). macOS has no timer_create, so it falls
-dnl back to setitimer(ITIMER_PROF) — coarser, and documented as dev-grade.
+dnl timer_create + SIGEV_THREAD_ID). Anything without them falls back to the
+dnl sampler thread in src/timer_thread.c, where profiling is off by default —
+dnl see KNOWN-ISSUES.md.
 
 PHP_ARG_ENABLE([cbox-telemetry],
   [whether to enable cbox_telemetry support],

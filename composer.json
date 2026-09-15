@@ -33,9 +33,10 @@
         "support-nts": true,
         "os-families-exclude": [
             "windows"
+        ],
+        "download-url-method": [
+            "pre-packaged-binary",
+            "composer-default"
         ]
-    },
-    "extra": {
-        "download-url-method": "pre-packaged-binary"
     }
 }

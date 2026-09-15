@@ -7,9 +7,9 @@
  *                   SIGEV_THREAD_ID, so the timer measures *this thread's*
  *                   CPU time and the signal is delivered to this thread.
  *                   Delivered on a real-time signal.
- *   timer_itimer.c  macOS and anything else without SIGEV_THREAD_ID.
- *                   setitimer(ITIMER_VIRTUAL): user CPU time, process-wide and
- *                   much coarser. Dev-grade, not a production target.
+ *   timer_thread.c  macOS and anything else without SIGEV_THREAD_ID. A sampler
+ *                   thread, wall clock, and unsafe enough that profiling is
+ *                   off by default there — see KNOWN-ISSUES.md.
  *
  * Neither backend uses SIGPROF or ITIMER_PROF, and that is deliberate: PHP
  * implements max_execution_time with exactly those on builds without
@@ -25,7 +25,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Install the SIGPROF handler, remembering any handler already there. */
+/* Install the sampling handler, remembering any handler already there. */
 int  cbox_timer_init(void);
 void cbox_timer_shutdown(void);
 

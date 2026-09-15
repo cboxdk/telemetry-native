@@ -56,14 +56,15 @@ The handler runs in signal context after something has already gone badly wrong,
 so it does only what POSIX guarantees is safe there:
 
 - fills in the mutable fields of a record that was formatted at startup
-- `write()`s it to a descriptor opened long before
+- opens its own sink and `write()`s to it — `open` and `write` are both
+  async-signal-safe, and the path was built beforehand because `snprintf` is not
 - restores the previous handler and gets out of the way
 
 No allocation. No Zend API. No PHP callbacks. No locks. No stdio. A latch makes
 a crash inside the crash handler `_exit` rather than loop.
 
-Records are smaller than `PIPE_BUF` and written with a single `O_APPEND` write,
-so many workers share one sink without interleaving.
+Each record is written with a single `O_APPEND` write to that process's own
+sink, so there is nothing to interleave with.
 
 ## The process still dies normally
 
@@ -71,12 +72,13 @@ The handler restores whatever disposition was there before and lets the process
 die exactly as it would have — core dump, FPM child accounting, everything. A
 handler that swallowed the signal would be far worse than no handler.
 
-For a hardware fault (`si_code > 0`: a real segfault, bus error, illegal
-instruction) returning is enough: the faulting instruction re-traps against the
-restored handler, and the core dump still points at it. For a signal that was
-*sent* rather than trapped — `kill -ABRT`, the `raise()` inside `abort()` —
-returning would let the process carry on as if nothing happened, so those are
-re-raised explicitly.
+It always re-raises after restoring. An earlier version only did that for
+signals it judged to have been *sent*, trusting a hardware fault to re-trap on
+return — but `si_code` does not mean the same thing everywhere. Darwin reports
+`si_code = 2` for a `kill()`-sent SIGSEGV too, so that version classified it as
+a fault, returned, and left the process running after a fatal signal, having
+already written a crash record for it. Re-raising costs a real fault nothing:
+it re-traps before the pending signal is ever delivered.
 
 If another handler was installed before ours, it is chained rather than
 replaced.

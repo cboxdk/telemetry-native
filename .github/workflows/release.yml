@@ -127,9 +127,22 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            --repo "${{ github.repository }}" \
-            --title "${{ github.ref_name }}" \
-            --notes-file <(sed -n '/^## \[Unreleased\]/,/^## \[/p' CHANGELOG.md | head -100) \
-            artifacts/*.tgz artifacts/SHA256SUMS
+          # Select this version's section, not the range from [Unreleased] to the
+          # next heading — which at release time is empty and yields a body of
+          # two headings and nothing else.
+          # Create-or-upload rather than create. Drafting a release in the
+          # GitHub UI creates the tag first, which triggers this workflow and
+          # would otherwise die on "already_exists", leaving a release with no
+          # assets. The same applies to re-running this job.
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$TAG" --repo "${{ github.repository }}" --clobber \
+              artifacts/*.tgz artifacts/SHA256SUMS
+          else
+            gh release create "$TAG" \
+              --repo "${{ github.repository }}" \
+              --title "$TAG" \
+              --notes-file <(awk -v v="${TAG#v}" '/^## \[/{p = index($0,"["v"]")>0; if (p) next} p' CHANGELOG.md) \
+              artifacts/*.tgz artifacts/SHA256SUMS
+          fi

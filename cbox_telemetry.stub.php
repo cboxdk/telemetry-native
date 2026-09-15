@@ -15,9 +15,12 @@ function cbox_telemetry_version(): string {}
 function cbox_telemetry_status(): array {}
 
 /**
- * Begin a unit of work. Returns a handle, or 0 when the extension is disabled
- * or declined to start (which callers should treat as "no native telemetry",
- * never as an error).
+ * Begin a unit of work. Returns a handle, or 0 when the extension is absent or
+ * switched off entirely (never as an error).
+ *
+ * A unit still opens when profiling is unavailable: the handle is real and
+ * finish() reports profiling => false.  A second begin() on an already-adopted
+ * automatic unit starts a fresh unit and discards what the first collected.
  *
  * With cbox_telemetry.auto enabled, a unit is already open by the time any PHP
  * runs, and this call *adopts* it: the samples taken during bootstrap are kept,

@@ -100,12 +100,16 @@ counted separately:
 | `deferred_events` / `max_deferred` | how often, and the worst single stretch | a large `max_deferred` names a single very long native call |
 | `timer_overruns` | the kernel could not deliver at the requested period at all | sample less often; this period is finer than the platform manages |
 
-Nothing was observed for an overrun — those ticks are counted, not sampled — so
-a profile with more overruns than samples is mostly arithmetic. Folding the two
+Nothing was *observed* for an overrun: no stack was walked for it. The ticks
+are not discarded though — they are folded into the weight of the next sample
+that is taken, so they land on that sample's leaf frame. A profile with more
+overruns than samples is therefore mostly arithmetic spread over whatever
+happened to be running when delivery resumed. Folding the two
 into one number would hide the difference between "the application is in native
 code" and "the configuration is wrong".
 
-Measured on Linux with the CPU-time backend, a tight PHP loop:
+Measured on Linux with the CPU-time backend, a tight PHP loop, on a
+`CONFIG_HZ=1000` kernel:
 
 | requested period | samples | deferred | timer overruns |
 |---|---|---|---|
@@ -114,7 +118,14 @@ Measured on Linux with the CPU-time backend, a tight PHP loop:
 
 At 200 µs four out of five ticks are never delivered. The profile still looks
 like it has 1,492 samples, and without `timer_overruns` there is nothing to say
-otherwise. This is the main reason the default is 1 ms.
+otherwise.
+
+The reason is the kernel, not the extension: Linux evaluates POSIX CPU timers on
+the scheduler tick, so the effective floor is one tick — about 1 ms at
+`CONFIG_HZ=1000`, and 4 ms at the `HZ=250` that Debian and Ubuntu ship in their
+generic kernels. The 1 ms default suits the first and would overrun three ticks
+in four on the second. Rather than trusting any default, read `timer_overruns`
+on your own kernel: it tells you what period you can actually have.
 
 The wall-clock fallback backend defers heavily by construction — it keeps
 counting while the process is descheduled, so a sample can be attributed long
@@ -150,10 +161,12 @@ obviously better: the sampling itself is cheap, but a rate high enough to
 resolve a 2 ms function is also high enough to make a profile of a 2-second
 request enormous and no more actionable.
 
-On Linux the measured period matches the requested one closely (1 ms requested →
-1.00 ms measured). On the fallback backend it is the requested period plus
-scheduling latency, which at 1 ms is roughly a 2× error — usable for finding the
-hot function, not for absolute timings.
+On Linux the measured period matches the requested one closely at 1 ms on a
+`CONFIG_HZ=1000` kernel (1.00 ms measured) — but that is the tick granularity
+agreeing with the request, not the timer resolving finer. Anything below a tick
+is delivered at tick rate and reported as overruns. On the fallback backend it
+is the requested period plus scheduling latency, roughly a 2× error at 1 ms —
+usable for finding the hot function, not for absolute timings.
 
 ## What it does not do
 

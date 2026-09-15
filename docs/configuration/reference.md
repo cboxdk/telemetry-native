@@ -71,7 +71,7 @@ reads; anything else is ignored.
 | key | type | |
 |---|---|---|
 | `trace_id` | 32 hex chars | Stored raw for the crash record. An all-zero id counts as absent. |
-| `span_id` | 16 hex chars | Same. |
+| `span_id` | 16 hex chars | Reported only if it decodes; an unusable value is treated as absent rather than sent as all zeros. |
 | `unit` | `http`\|`queue`\|`command`\|`schedule` | Anything else becomes `other`. |
 | `sampled` | bool | `false` means the profiler never starts, whatever else you asked for. |
 | `profile` | bool | Whether to run the profiler for this unit at all. |
@@ -86,8 +86,9 @@ disagree — a consumer configured to want PDO timing on a build where
 no error anywhere.
 
 That is worth surfacing in whatever diagnostics the consumer offers.
-`cbox_telemetry_status()` returns both `hook_detail` (what the INI enabled) and
-`hooks` (the summary), which is enough to notice the mismatch and say so.
+`cbox_telemetry_status()` returns both `hooks` (which groups the INI enabled)
+and `hook_detail` (requested versus actually installed), which is enough to
+notice the mismatch and say so.
 
 ## PHP-FPM
 
@@ -102,8 +103,10 @@ they will record nothing.
 
 The dominant cost is the arena, at roughly `max_frames × 256` bytes — about 1 MB
 at the defaults, allocated once per process at startup, never grown. Plus the
-frame table, the trie (`max_nodes × 12` bytes) and the breadcrumb ring
-(`breadcrumbs.size × 64` bytes).
+frame table, the trie (`max_nodes × 12` bytes plus a bucket array of
+`max_nodes × 8` bytes), the frame table, and the breadcrumb ring
+(`breadcrumbs.size × 64` bytes). At the defaults that is roughly 1 MB of arena
+plus another 430 KB of fixed tables.
 
-`cbox_telemetry_status()['arena_peak_bytes']` reports the high-water mark. If it
+`cbox_telemetry_status()['arena_peak_bytes']` reports the high-water mark for the process, not for one unit. If it
 never approaches the ceiling, `max_frames` can come down.

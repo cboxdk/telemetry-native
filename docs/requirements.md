@@ -27,7 +27,7 @@ not async-signal-safe.
 |---|---|
 | Linux x86_64 / arm64, glibc | supported — CPU-time sampling via `timer_create` |
 | Linux x86_64 / arm64, musl (Alpine) | supported, same backend |
-| macOS arm64 | development only — everything except CPU profiling, which is off by default there ([why](KNOWN-ISSUES.md)) |
+| macOS arm64 | development only — everything except CPU profiling, which is off by default there ([why](../KNOWN-ISSUES.md)) |
 | Windows | out of scope; `composer.json` excludes it |
 
 The difference between Linux and macOS is not cosmetic. See

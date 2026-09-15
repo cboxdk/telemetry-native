@@ -19,7 +19,7 @@ typedef struct _cbox_hook {
 	bool             installed;
 } cbox_hook;
 
-#define CBOX_HOOK_MAX 8
+#define CBOX_HOOK_MAX 16
 
 static cbox_hook cbox_hooks[CBOX_HOOK_MAX];
 static uint32_t  cbox_hook_count = 0;
@@ -48,13 +48,14 @@ static uint32_t cbox_hook_names_count = 0;
  * than losing the timing of a call that killed the request anyway.
  */
 #define CBOX_DEFINE_HOOK_HANDLER(index)                                        \
-	static ZEND_NAMED_FUNCTION(cbox_hook_handler_##index)                      \
+	static void cbox_hook_handler_##index(INTERNAL_FUNCTION_PARAMETERS)                      \
 	{                                                                          \
 		cbox_hook *hook = &cbox_hooks[index];                                  \
                                                                                \
-		cbox_telemetry_note_op_begin(hook->op);                                \
+		cbox_op_token token = cbox_telemetry_note_op_begin(hook->op);          \
+                                                                               \
 		hook->original(INTERNAL_FUNCTION_PARAM_PASSTHRU);                      \
-		cbox_telemetry_note_op_end(hook->op);                                  \
+		cbox_telemetry_note_op_end(token);                                     \
 	}
 
 CBOX_DEFINE_HOOK_HANDLER(0)
@@ -65,10 +66,20 @@ CBOX_DEFINE_HOOK_HANDLER(4)
 CBOX_DEFINE_HOOK_HANDLER(5)
 CBOX_DEFINE_HOOK_HANDLER(6)
 CBOX_DEFINE_HOOK_HANDLER(7)
+CBOX_DEFINE_HOOK_HANDLER(8)
+CBOX_DEFINE_HOOK_HANDLER(9)
+CBOX_DEFINE_HOOK_HANDLER(10)
+CBOX_DEFINE_HOOK_HANDLER(11)
+CBOX_DEFINE_HOOK_HANDLER(12)
+CBOX_DEFINE_HOOK_HANDLER(13)
+CBOX_DEFINE_HOOK_HANDLER(14)
+CBOX_DEFINE_HOOK_HANDLER(15)
 
 static const zif_handler cbox_hook_handlers[CBOX_HOOK_MAX] = {
 	cbox_hook_handler_0, cbox_hook_handler_1, cbox_hook_handler_2, cbox_hook_handler_3,
 	cbox_hook_handler_4, cbox_hook_handler_5, cbox_hook_handler_6, cbox_hook_handler_7,
+	cbox_hook_handler_8, cbox_hook_handler_9, cbox_hook_handler_10, cbox_hook_handler_11,
+	cbox_hook_handler_12, cbox_hook_handler_13, cbox_hook_handler_14, cbox_hook_handler_15,
 };
 
 static zend_function *cbox_find_function(const char *class_name, const char *function_name)
@@ -200,6 +211,20 @@ void cbox_hooks_install(bool pdo, bool redis, bool curl, bool streams)
 		cbox_hook_add(CBOX_GROUP_PDO, "PDO", "__construct", CBOX_OP_PDO_CONNECT);
 		/* PHP 8.4 added PDO::connect() as a second way in. */
 		cbox_hook_add(CBOX_GROUP_PDO, "PDO", "connect", CBOX_OP_PDO_CONNECT);
+
+		/*
+		 * PHP 8.4's driver subclasses each hold their own copy of the
+		 * inherited method — Zend copies internal methods into the subclass at
+		 * inheritance time — so patching PDO::connect does not reach
+		 * Pdo\Sqlite::connect(). Each has to be hooked in its own right;
+		 * missing ones are simply not present in this build.
+		 */
+		cbox_hook_add(CBOX_GROUP_PDO, "Pdo\\Mysql", "connect", CBOX_OP_PDO_CONNECT);
+		cbox_hook_add(CBOX_GROUP_PDO, "Pdo\\Pgsql", "connect", CBOX_OP_PDO_CONNECT);
+		cbox_hook_add(CBOX_GROUP_PDO, "Pdo\\Sqlite", "connect", CBOX_OP_PDO_CONNECT);
+		cbox_hook_add(CBOX_GROUP_PDO, "Pdo\\Odbc", "connect", CBOX_OP_PDO_CONNECT);
+		cbox_hook_add(CBOX_GROUP_PDO, "Pdo\\Firebird", "connect", CBOX_OP_PDO_CONNECT);
+		cbox_hook_add(CBOX_GROUP_PDO, "Pdo\\Dblib", "connect", CBOX_OP_PDO_CONNECT);
 	}
 
 	if (redis) {

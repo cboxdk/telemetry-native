@@ -30,7 +30,7 @@ for ($unit = 0; $unit < 200; $unit++) {
         echo "sample count accumulated across units\n";
     }
 
-    $peak = max($peak, $result['counters']['arena.peak_bytes']);
+    $peak = max($peak, $result['counters']['arena.peak_bytes_total']);
 }
 
 $status = cbox_telemetry_status();

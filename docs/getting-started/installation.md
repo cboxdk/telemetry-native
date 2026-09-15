@@ -42,7 +42,7 @@ php -r 'print_r(cbox_telemetry_status());'
 ```
 
 ```php
-[version] => 0.1.0-dev
+[version] => 0.1.0
 [enabled] => 1
 [timer_backend] => posix-thread-cputime
 [timer_cpu_time] => 1

@@ -22,8 +22,12 @@ SQL text or bindings, environment variables, connection strings, cookies,
 headers, or any other application value — not by default and not behind a flag.
 There is no code path that reads them.
 
-Crash records carry the same bounded data plus a signal number, a pid, a
-timestamp and the trace/span ids the caller supplied. Breadcrumb labels are
+Crash records carry the same bounded data plus a signal number and `si_code`, a
+pid, a timestamp, the trace/span ids the caller supplied, and — for diagnosing
+crashes — three raw memory addresses: the faulting address, the program counter,
+and where this extension is mapped. Those are machine addresses, not application
+data, but they do describe the process's memory layout, so treat a crash record
+as something to keep inside your own infrastructure. Breadcrumb labels are
 truncated to 48 bytes at write time and are never free-form application strings.
 
 Application-level redaction is `cboxdk/laravel-telemetry`'s job, and it remains
