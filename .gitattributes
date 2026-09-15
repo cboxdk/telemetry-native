@@ -1,15 +1,16 @@
-# Keep the distributed package to what is needed to build and load the
-# extension. Tests, benchmarks and docs stay in the repository.
+# Trim the distributed archive — but only things no build or CI job can need.
+#
+# export-ignore also applies to GitHub's source archives, and a job whose
+# container has no git falls back to downloading one. Excluding /tests that way
+# did not merely skip the tests in the musl jobs: `make test` found nothing to
+# run and the job went green having tested nothing, which is worse than a red
+# one. Tests, benchmarks and docs stay in the archive for that reason.
 /.github            export-ignore
-/benchmarks         export-ignore
-/docs               export-ignore
-/tests              export-ignore
 /.gitattributes     export-ignore
 /.gitignore         export-ignore
 /AGENTS.md          export-ignore
 /CLAUDE.md          export-ignore
 /CONTRIBUTING.md    export-ignore
-/KNOWN-ISSUES.md    export-ignore
 /llms.txt           export-ignore
 
 # Keep line endings sane for the sources a build touches.
@@ -18,3 +19,4 @@
 *.m4    text eol=lf
 *.php   text eol=lf
 *.phpt  text eol=lf
+*.sh    text eol=lf

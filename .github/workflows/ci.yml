@@ -56,7 +56,14 @@ jobs:
           '
 
       - name: Test
-        run: NO_INTERACTION=1 REPORT_EXIT_STATUS=1 make test TESTS=tests
+        run: |
+          set -o pipefail
+          NO_INTERACTION=1 REPORT_EXIT_STATUS=1 make test TESTS=tests 2>&1 | tee /tmp/test-output.txt
+          # A suite that ran nothing must not report success. This is not
+          # hypothetical: an export-ignore rule once removed tests/ from the
+          # container checkouts and those jobs passed having tested nothing.
+          grep -qE "Tests passed +: +[1-9]" /tmp/test-output.txt \
+            || { echo "::error::no tests ran — the suite is missing or was not collected"; exit 1; }
 
       - name: Show failure diffs
         if: failure()
@@ -82,7 +89,10 @@ jobs:
           phpize
           ./configure --enable-cbox-telemetry
           make -j4
-          NO_INTERACTION=1 REPORT_EXIT_STATUS=1 make test TESTS=tests
+          set -o pipefail
+          NO_INTERACTION=1 REPORT_EXIT_STATUS=1 make test TESTS=tests 2>&1 | tee /tmp/test-output.txt
+          grep -qE "Tests passed +: +[1-9]" /tmp/test-output.txt \
+            || { echo "::error::no tests ran — the suite is missing or was not collected"; exit 1; }
 
   fpm:
     name: "php-fpm privilege separation · php ${{ matrix.php }}"
