@@ -1,6 +1,7 @@
 #include "php.h"
 #include "zend_execute.h"
 
+#include "clock.h"
 #include "profiler.h"
 #include "timer.h"
 
@@ -31,12 +32,14 @@ static struct {
 	uint64_t period_ns;
 	uint64_t samples;
 	uint64_t dropped;
+	uint64_t deadline_ns; /* 0 = no limit */
 	uint32_t max_depth;
 	uint32_t truncated_frame;
 
 	bool ready;
 	bool running;
 	bool installed;
+	bool capped;
 } cbox_profiler;
 
 static void (*cbox_previous_interrupt)(zend_execute_data *execute_data) = NULL;
@@ -55,6 +58,21 @@ typedef struct _cbox_name_builder {
 	char   buffer[CBOX_FRAME_NAME_MAX + 1];
 	size_t length;
 } cbox_name_builder;
+
+/*
+ * Scratch space for one sample, deliberately static rather than automatic.
+ *
+ * The interrupt handler runs on the VM's own C stack, at whatever depth the
+ * engine happens to be — inside JIT'd code, under nested internal calls, close
+ * to the stack limit PHP enforces. Putting ~1.4 KB of frame ids and name
+ * building there on every sample is borrowing from a budget we did not set and
+ * cannot see.
+ *
+ * Static is safe here because collection is not reentrant: it runs only from
+ * zend_interrupt_function, at a VM safe point, and no PHP executes inside it.
+ */
+static uint32_t          cbox_sample_ids[CBOX_PROFILER_DEPTH_HARD_MAX];
+static cbox_name_builder cbox_sample_name;
 
 static void cbox_name_append(cbox_name_builder *name, const char *bytes, size_t len)
 {
@@ -77,23 +95,23 @@ static void cbox_name_append(cbox_name_builder *name, const char *bytes, size_t 
 static uint32_t cbox_profiler_frame_for(const zend_execute_data *frame)
 {
 	zend_function *func = frame->func;
-	cbox_name_builder name;
+	cbox_name_builder *name = &cbox_sample_name;
 	const char *file = NULL;
 	size_t file_len = 0;
 	uint32_t line = 0;
 
-	name.length = 0;
+	name->length = 0;
 
 	if (func->common.scope != NULL && func->common.scope->name != NULL) {
-		cbox_name_append(&name, ZSTR_VAL(func->common.scope->name), ZSTR_LEN(func->common.scope->name));
-		cbox_name_append(&name, "::", 2);
+		cbox_name_append(name, ZSTR_VAL(func->common.scope->name), ZSTR_LEN(func->common.scope->name));
+		cbox_name_append(name, "::", 2);
 	}
 
 	if (func->common.function_name != NULL) {
-		cbox_name_append(&name, ZSTR_VAL(func->common.function_name), ZSTR_LEN(func->common.function_name));
+		cbox_name_append(name, ZSTR_VAL(func->common.function_name), ZSTR_LEN(func->common.function_name));
 	} else {
-		/* File-level code has no function name; Excimer and friends call it {main}. */
-		cbox_name_append(&name, "{main}", 6);
+		/* File-level code has no function name; convention calls it {main}. */
+		cbox_name_append(name, "{main}", 6);
 	}
 
 	/*
@@ -113,7 +131,7 @@ static uint32_t cbox_profiler_frame_for(const zend_execute_data *frame)
 	return cbox_frames_intern(
 		&cbox_profiler.frames,
 		&cbox_profiler.arena,
-		name.buffer, name.length,
+		name->buffer, name->length,
 		file, file_len,
 		line
 	);
@@ -138,19 +156,25 @@ static uint32_t cbox_profiler_truncation_frame(void)
 
 static void cbox_profiler_collect(uint32_t weight)
 {
-	uint32_t ids[CBOX_PROFILER_DEPTH_HARD_MAX];
+	uint32_t *ids = cbox_sample_ids;
 	uint32_t depth = 0;
 	uint32_t node = CBOX_NODE_ROOT;
 	uint32_t index;
+	uint32_t max_depth = cbox_profiler.max_depth;
 	bool truncated = false;
 	zend_execute_data *frame = EG(current_execute_data);
+
+	/* Defensive: never index the scratch array from unvalidated state. */
+	if (max_depth == 0 || max_depth > CBOX_PROFILER_DEPTH_HARD_MAX) {
+		max_depth = CBOX_PROFILER_DEPTH_HARD_MAX;
+	}
 
 	/* Innermost first, which is the order the engine keeps them in. */
 	while (frame != NULL) {
 		if (frame->func != NULL) {
 			uint32_t id;
 
-			if (depth >= cbox_profiler.max_depth) {
+			if (depth >= max_depth) {
 				truncated = true;
 				break;
 			}
@@ -206,6 +230,19 @@ static void cbox_profiler_interrupt(zend_execute_data *execute_data)
 
 	if (pending > 0 && cbox_profiler.running && cbox_profiler.ready) {
 		cbox_profiler_collect(pending);
+
+		/*
+		 * Check the deadline rarely — once every few hundred samples is
+		 * plenty for a valve measured in seconds, and a clock read on every
+		 * sample would be a real cost at a 100 us period.
+		 */
+		if (cbox_profiler.deadline_ns != 0
+			&& (cbox_profiler.samples & 0x3ff) == 0
+			&& cbox_now_ns() > cbox_profiler.deadline_ns
+		) {
+			cbox_profiler_stop();
+			cbox_profiler.capped = true;
+		}
 	}
 
 	if (cbox_previous_interrupt != NULL) {
@@ -287,7 +324,7 @@ void cbox_profiler_uninstall(void)
 	cbox_profiler.installed = false;
 }
 
-int cbox_profiler_start(uint64_t period_ns, uint32_t max_depth)
+int cbox_profiler_start(uint64_t period_ns, uint32_t max_depth, uint64_t max_duration_ns)
 {
 	if (!cbox_profiler.ready || period_ns == 0) {
 		return -1;
@@ -300,6 +337,9 @@ int cbox_profiler_start(uint64_t period_ns, uint32_t max_depth)
 	cbox_profiler_reset();
 	cbox_profiler.max_depth = max_depth;
 	cbox_profiler.period_ns = period_ns;
+	cbox_profiler.deadline_ns = max_duration_ns == 0
+		? 0
+		: cbox_now_ns() + max_duration_ns;
 
 	if (cbox_timer_arm(period_ns) != 0) {
 		cbox_profiler.period_ns = 0;
@@ -337,6 +377,7 @@ void cbox_profiler_reset(void)
 	cbox_profiler.samples = 0;
 	cbox_profiler.dropped = 0;
 	cbox_profiler.truncated_frame = CBOX_FRAME_NONE;
+	cbox_profiler.capped = false;
 }
 
 bool cbox_profiler_running(void)
@@ -357,6 +398,11 @@ uint64_t cbox_profiler_sample_count(void)
 uint64_t cbox_profiler_dropped(void)
 {
 	return cbox_profiler.dropped + cbox_profiler.tree.dropped + cbox_profiler.frames.dropped;
+}
+
+bool cbox_profiler_capped(void)
+{
+	return cbox_profiler.capped;
 }
 
 size_t cbox_profiler_arena_peak(void)

@@ -15,6 +15,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
 
+    # macOS is a development platform for this extension, and it has a known,
+    # unexplained ~1-in-8 suite flake there (see KNOWN-ISSUES.md). Its results
+    # are still worth seeing, so the job runs and reports — it just does not
+    # gate the build while that is open. Linux and musl do gate.
+    continue-on-error: ${{ startsWith(matrix.os, 'macos') }}
+
     strategy:
       fail-fast: false
       matrix:

@@ -26,6 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   record, handlers for `SIGSEGV`/`SIGABRT`/`SIGBUS`/`SIGILL` that allocate
   nothing and chain to whatever was there before, and a drain that decodes
   records back into PHP.
+- Optional automatic instrumentation (`cbox_telemetry.auto`, off by default).
+  A unit of work opens at RINIT, so measurement starts at the first instruction
+  rather than whenever a framework gets around to asking — which is the only way
+  to profile autoloading, service providers and config, all of which happen long
+  before any middleware runs. `cbox_telemetry_finish(0)` collects whichever unit
+  is open, so a terminate hook needs no handle. The first `begin()` *adopts* the
+  running unit instead of restarting it, keeping the bootstrap samples and
+  labelling them with the caller's trace context. `auto_max_ms` stops an
+  automatic unit that nobody closes from sampling forever in a long-running
+  process, where explicit begin/finish per job is the right shape anyway.
 - Five PHP functions and nothing else: `cbox_telemetry_version`,
   `cbox_telemetry_status`, `cbox_telemetry_begin`, `cbox_telemetry_finish`,
   `cbox_telemetry_drain_crashes`.

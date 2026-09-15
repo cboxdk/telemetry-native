@@ -89,6 +89,22 @@ looking like a shallow one.
 
 `sample_count` is the sum of `top_functions` samples, always.
 
+### Attribution of internal calls moves between PHP versions
+
+Where a sample taken during an internal call lands is the engine's business,
+not ours, and the engine changed its mind. The same `sqrt()` in a loop:
+
+| | top functions |
+|---|---|
+| PHP 8.3 | the *calling* userland function |
+| PHP 8.4, 8.5 | `sqrt` itself, with the caller below it |
+
+Neither is wrong, and we do not normalise it — inventing a frame the engine did
+not report would be worse than reporting what it did. The call tree is stable
+across both: the path is the same, only which node owns the self time differs.
+So if you are comparing profiles across a PHP upgrade, or asserting on them in
+a test, use inclusive time from `stacks` rather than `top_functions`.
+
 ## Choosing a period
 
 The default is 1 ms, and the range is clamped to 100 µs – 100 ms. Faster is not

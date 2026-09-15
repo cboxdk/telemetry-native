@@ -1,6 +1,7 @@
 #include "php_cbox_telemetry.h"
 
 #include "php_ini.h"
+#include "SAPI.h"
 #include "ext/standard/info.h"
 #include "zend_gc.h"
 
@@ -221,6 +222,111 @@ static void cbox_profile_into(zval *profile, bool include_stacks)
 	add_assoc_zval(profile, "stacks", &stack_list);
 }
 
+/*
+ * A guess, and only a guess — whoever calls begin() knows better and can say
+ * so. It exists so an automatic unit is not labelled "other" on the overwhelming
+ * majority of installs, which are FPM serving HTTP.
+ */
+static cbox_unit_type cbox_unit_type_for_sapi(void)
+{
+	const char *name = sapi_module.name;
+
+	if (name == NULL) {
+		return CBOX_UNIT_OTHER;
+	}
+
+	if (strcmp(name, "cli") == 0 || strcmp(name, "phpdbg") == 0) {
+		return CBOX_UNIT_COMMAND;
+	}
+
+	return CBOX_UNIT_HTTP;
+}
+
+/* ----------------------------------------------------------- unit lifecycle */
+
+/* Trace ids are optional and independent of how the unit was opened. */
+static void cbox_unit_apply_trace(cbox_unit_state *unit, HashTable *context)
+{
+	zval *value;
+
+	if (context == NULL) {
+		return;
+	}
+
+	if ((value = zend_hash_str_find(context, "trace_id", sizeof("trace_id") - 1)) != NULL
+		&& Z_TYPE_P(value) == IS_STRING
+		&& cbox_hex_decode(Z_STRVAL_P(value), Z_STRLEN_P(value), unit->trace_id, CBOX_TRACE_ID_BYTES)
+		&& !cbox_bytes_are_zero(unit->trace_id, CBOX_TRACE_ID_BYTES)
+	) {
+		unit->has_trace = true;
+	}
+
+	if ((value = zend_hash_str_find(context, "span_id", sizeof("span_id") - 1)) != NULL
+		&& Z_TYPE_P(value) == IS_STRING) {
+		cbox_hex_decode(Z_STRVAL_P(value), Z_STRLEN_P(value), unit->span_id, CBOX_SPAN_ID_BYTES);
+	}
+}
+
+/*
+ * Opens a unit. Shared by the automatic RINIT path and by begin(), so the two
+ * cannot drift — an automatic unit is an ordinary unit that nobody has claimed
+ * yet.
+ */
+static uint32_t cbox_unit_open(
+	cbox_unit_type type,
+	bool           sampled,
+	bool           want_profile,
+	zend_long      period_us,
+	zend_long      max_depth,
+	bool           automatic
+) {
+	cbox_unit_state *unit = &CBOX_G(unit);
+	const char *label;
+
+	period_us = cbox_clamp(period_us, CBOX_PERIOD_US_MIN, CBOX_PERIOD_US_MAX);
+	max_depth = cbox_clamp(max_depth, 1, CBOX_DEPTH_MAX);
+
+	cbox_unit_reset(unit);
+	cbox_ops_reset(&CBOX_G(ops));
+
+	if (++CBOX_G(next_handle) == 0) {
+		CBOX_G(next_handle) = 1;
+	}
+
+	unit->handle = CBOX_G(next_handle);
+	unit->type = (uint8_t) type;
+	unit->sampled = sampled;
+	unit->automatic = automatic;
+	unit->adopted = false;
+	unit->start_ns = cbox_now_ns();
+
+	cbox_gc_counters(&CBOX_G(gc_runs_at_begin), &CBOX_G(gc_collected_at_begin));
+
+	label = cbox_unit_type_name(type);
+	cbox_crumbs_push(&CBOX_G(crumbs), CBOX_CRUMB_UNIT_BEGIN, (uint8_t) type,
+		label, strlen(label), unit->start_ns);
+
+	if (want_profile && sampled && CBOX_G(profiler_enabled)) {
+		/*
+		 * Only an automatic unit gets a deadline. An explicit one has an owner
+		 * who is going to call finish(); an automatic one might be sitting in a
+		 * queue worker that never will.
+		 */
+		uint64_t limit = automatic
+			? (uint64_t) CBOX_G(auto_max_ms) * 1000000ull
+			: 0;
+
+		if (cbox_profiler_start((uint64_t) period_us * 1000ull, (uint32_t) max_depth, limit) == 0) {
+			unit->profiling = true;
+		}
+	} else {
+		/* Still clear the native state so the last unit cannot bleed into this one. */
+		cbox_profiler_reset();
+	}
+
+	return unit->handle;
+}
+
 /* ------------------------------------------------------------------ functions */
 
 PHP_FUNCTION(cbox_telemetry_version)
@@ -273,7 +379,9 @@ PHP_FUNCTION(cbox_telemetry_status)
 		add_assoc_null(return_value, "crash_path");
 	}
 
+	add_assoc_bool(return_value, "auto", CBOX_G(auto_start));
 	add_assoc_long(return_value, "unit_handle", (zend_long) CBOX_G(unit).handle);
+	add_assoc_bool(return_value, "unit_automatic", CBOX_G(unit).automatic);
 	add_assoc_long(return_value, "profiler_samples", (zend_long) cbox_profiler_sample_count());
 	add_assoc_long(return_value, "profiler_dropped", (zend_long) cbox_profiler_dropped());
 	add_assoc_long(return_value, "arena_peak_bytes", (zend_long) cbox_profiler_arena_peak());
@@ -285,6 +393,7 @@ PHP_FUNCTION(cbox_telemetry_status)
 	add_assoc_long(&limits, "max_frames", CBOX_G(max_frames));
 	add_assoc_long(&limits, "max_nodes", CBOX_G(max_nodes));
 	add_assoc_long(&limits, "breadcrumbs", (zend_long) CBOX_G(crumbs).capacity);
+	add_assoc_long(&limits, "auto_max_ms", CBOX_G(auto_max_ms));
 	add_assoc_zval(return_value, "limits", &limits);
 
 	array_init(&hooks);
@@ -304,8 +413,8 @@ PHP_FUNCTION(cbox_telemetry_begin)
 	zend_long max_depth = CBOX_G(max_depth);
 	bool want_profile = true;
 	bool sampled = true;
+	bool explicit_type = false;
 	cbox_unit_type type = CBOX_UNIT_OTHER;
-	const char *label;
 
 	ZEND_PARSE_PARAMETERS_START(0, 1)
 		Z_PARAM_OPTIONAL
@@ -316,19 +425,11 @@ PHP_FUNCTION(cbox_telemetry_begin)
 		RETURN_LONG(0);
 	}
 
-	/*
-	 * Units do not nest. A second begin() abandons the first rather than
-	 * stacking, so a caller that leaks a handle degrades to "last one wins"
-	 * instead of leaving a timer armed forever.
-	 */
-	if (unit->handle != 0) {
-		cbox_profiler_stop();
-	}
-
 	if (context != NULL) {
 		if ((value = zend_hash_str_find(context, "unit", sizeof("unit") - 1)) != NULL
 			&& Z_TYPE_P(value) == IS_STRING) {
 			type = cbox_unit_type_from(Z_STRVAL_P(value), Z_STRLEN_P(value));
+			explicit_type = true;
 		}
 
 		if ((value = zend_hash_str_find(context, "sampled", sizeof("sampled") - 1)) != NULL) {
@@ -350,50 +451,56 @@ PHP_FUNCTION(cbox_telemetry_begin)
 		}
 	}
 
-	period_us = cbox_clamp(period_us, CBOX_PERIOD_US_MIN, CBOX_PERIOD_US_MAX);
-	max_depth = cbox_clamp(max_depth, 1, CBOX_DEPTH_MAX);
+	/*
+	 * Adopt an automatic unit rather than restarting it. The samples taken
+	 * before this call are the framework booting — autoloading, providers,
+	 * config — which is exactly the part a middleware-level begin() could
+	 * never see. Throwing them away to start a "clean" unit would discard the
+	 * most interesting half of a slow cold request.
+	 */
+	if (unit->handle != 0 && unit->automatic && !unit->adopted) {
+		unit->adopted = true;
+		unit->sampled = sampled;
 
-	cbox_unit_reset(unit);
-	cbox_ops_reset(&CBOX_G(ops));
-
-	if (++CBOX_G(next_handle) == 0) {
-		CBOX_G(next_handle) = 1;
-	}
-
-	unit->handle = CBOX_G(next_handle);
-	unit->type = (uint8_t) type;
-	unit->sampled = sampled;
-	unit->start_ns = cbox_now_ns();
-
-	if (context != NULL) {
-		if ((value = zend_hash_str_find(context, "trace_id", sizeof("trace_id") - 1)) != NULL
-			&& Z_TYPE_P(value) == IS_STRING
-			&& cbox_hex_decode(Z_STRVAL_P(value), Z_STRLEN_P(value), unit->trace_id, CBOX_TRACE_ID_BYTES)
-			&& !cbox_bytes_are_zero(unit->trace_id, CBOX_TRACE_ID_BYTES)
-		) {
-			unit->has_trace = true;
+		if (explicit_type) {
+			unit->type = (uint8_t) type;
 		}
 
-		if ((value = zend_hash_str_find(context, "span_id", sizeof("span_id") - 1)) != NULL
-			&& Z_TYPE_P(value) == IS_STRING) {
-			cbox_hex_decode(Z_STRVAL_P(value), Z_STRLEN_P(value), unit->span_id, CBOX_SPAN_ID_BYTES);
+		if (!sampled || !want_profile) {
+			/* The caller says this one is not worth keeping. */
+			cbox_profiler_stop();
+			cbox_profiler_reset();
+			unit->profiling = false;
+		} else if (!unit->profiling && CBOX_G(profiler_enabled)) {
+			/* Automatic start did not profile, but this caller wants one. */
+			if (cbox_profiler_start(
+					(uint64_t) cbox_clamp(period_us, CBOX_PERIOD_US_MIN, CBOX_PERIOD_US_MAX) * 1000ull,
+					(uint32_t) cbox_clamp(max_depth, 1, CBOX_DEPTH_MAX),
+					0) == 0) {
+				unit->profiling = true;
+			}
 		}
+		/*
+		 * A profile already running keeps its period. Re-arming at a new one
+		 * would mean discarding the samples we adopted this unit for.
+		 */
+
+		cbox_unit_apply_trace(unit, context);
+
+		RETURN_LONG((zend_long) unit->handle);
 	}
 
-	cbox_gc_counters(&CBOX_G(gc_runs_at_begin), &CBOX_G(gc_collected_at_begin));
-
-	label = cbox_unit_type_name(type);
-	cbox_crumbs_push(&CBOX_G(crumbs), CBOX_CRUMB_UNIT_BEGIN, (uint8_t) type,
-		label, strlen(label), unit->start_ns);
-
-	if (want_profile && sampled && CBOX_G(profiler_enabled)) {
-		if (cbox_profiler_start((uint64_t) period_us * 1000ull, (uint32_t) max_depth) == 0) {
-			unit->profiling = true;
-		}
-	} else {
-		/* Still clear the native state so the last unit cannot bleed into this one. */
-		cbox_profiler_reset();
+	/*
+	 * Units do not nest. A second begin() abandons the first rather than
+	 * stacking, so a caller that leaks a handle degrades to "last one wins"
+	 * instead of leaving a timer armed forever.
+	 */
+	if (unit->handle != 0) {
+		cbox_profiler_stop();
 	}
+
+	cbox_unit_open(type, sampled, want_profile, period_us, max_depth, false);
+	cbox_unit_apply_trace(unit, context);
 
 	RETURN_LONG((zend_long) unit->handle);
 }
@@ -416,8 +523,19 @@ PHP_FUNCTION(cbox_telemetry_finish)
 		Z_PARAM_BOOL(include_stacks)
 	ZEND_PARSE_PARAMETERS_END();
 
-	/* An unknown handle is not an error: the caller simply gets nothing. */
-	if (!CBOX_G(active) || unit->handle == 0 || (zend_long) unit->handle != handle) {
+	/*
+	 * Handle 0 means "whichever unit is open". That is what makes automatic
+	 * instrumentation usable from a terminate hook: the caller never saw a
+	 * begin() and has no handle to quote back at us.
+	 *
+	 * Any other unknown handle is not an error either — the caller simply gets
+	 * nothing back.
+	 */
+	if (!CBOX_G(active) || unit->handle == 0) {
+		RETURN_EMPTY_ARRAY();
+	}
+
+	if (handle != 0 && (zend_long) unit->handle != handle) {
 		RETURN_EMPTY_ARRAY();
 	}
 
@@ -432,6 +550,7 @@ PHP_FUNCTION(cbox_telemetry_finish)
 	add_assoc_string(return_value, "unit", cbox_unit_type_name((cbox_unit_type) unit->type));
 	add_assoc_bool(return_value, "sampled", unit->sampled);
 	add_assoc_bool(return_value, "profiling", unit->profiling);
+	add_assoc_bool(return_value, "automatic", unit->automatic);
 
 	array_init(&operations);
 
@@ -463,6 +582,7 @@ PHP_FUNCTION(cbox_telemetry_finish)
 	add_assoc_long(&counters, "ops.overflow", (zend_long) ops->overflow);
 	add_assoc_long(&counters, "breadcrumbs.written", (zend_long) CBOX_G(crumbs).written);
 	add_assoc_long(&counters, "arena.peak_bytes", (zend_long) cbox_profiler_arena_peak());
+	add_assoc_bool(&counters, "profiler.capped", cbox_profiler_capped());
 	add_assoc_long(&counters, "profiler.frames", (zend_long) cbox_profiler_frames()->count);
 	add_assoc_long(&counters, "profiler.nodes", (zend_long) cbox_profiler_tree()->count);
 	add_assoc_zval(return_value, "counters", &counters);
@@ -607,6 +727,10 @@ PHP_INI_BEGIN()
 		crash_enabled, zend_cbox_telemetry_globals, cbox_telemetry_globals)
 	STD_PHP_INI_ENTRY("cbox_telemetry.crash.dir", "/tmp/cbox-telemetry", PHP_INI_SYSTEM, OnUpdateString,
 		crash_dir, zend_cbox_telemetry_globals, cbox_telemetry_globals)
+	STD_PHP_INI_BOOLEAN("cbox_telemetry.auto", "0", PHP_INI_SYSTEM, OnUpdateBool,
+		auto_start, zend_cbox_telemetry_globals, cbox_telemetry_globals)
+	STD_PHP_INI_ENTRY("cbox_telemetry.auto_max_ms", "60000", PHP_INI_SYSTEM, OnUpdateLong,
+		auto_max_ms, zend_cbox_telemetry_globals, cbox_telemetry_globals)
 PHP_INI_END()
 
 /* ------------------------------------------------------------------ lifecycle */
@@ -689,6 +813,27 @@ PHP_RINIT_FUNCTION(cbox_telemetry)
 			CBOX_G(hook_redis),
 			CBOX_G(hook_curl),
 			CBOX_G(hook_streams)
+		);
+	}
+
+	/*
+	 * Automatic instrumentation. Starting here rather than waiting for a
+	 * caller is the whole point: by the time framework middleware runs, the
+	 * expensive part of a cold request — autoloading, service providers,
+	 * config and route caching — has already happened, and a profile that
+	 * starts afterwards cannot see any of it.
+	 *
+	 * The unit type is guessed from the SAPI and can be corrected by the first
+	 * begin(), which adopts this unit rather than replacing it.
+	 */
+	if (CBOX_G(active) && CBOX_G(enabled) && CBOX_G(auto_start) && CBOX_G(unit).handle == 0) {
+		cbox_unit_open(
+			cbox_unit_type_for_sapi(),
+			true,
+			true,
+			CBOX_G(period_us),
+			CBOX_G(max_depth),
+			true
 		);
 	}
 

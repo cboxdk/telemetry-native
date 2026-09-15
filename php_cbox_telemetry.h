@@ -35,6 +35,8 @@ extern zend_module_entry cbox_telemetry_module_entry;
 #define CBOX_CRUMBS_MIN        16
 #define CBOX_CRUMBS_MAX        4096
 #define CBOX_TOP_FUNCTIONS_MAX 256
+#define CBOX_AUTO_MAX_MS_MIN   1000
+#define CBOX_AUTO_MAX_MS_MAX   3600000
 
 ZEND_BEGIN_MODULE_GLOBALS(cbox_telemetry)
 	/* INI */
@@ -51,6 +53,8 @@ ZEND_BEGIN_MODULE_GLOBALS(cbox_telemetry)
 	zend_long crumb_capacity;
 	bool      crash_enabled;
 	char     *crash_dir;
+	bool      auto_start;
+	zend_long auto_max_ms;
 
 	/* Runtime */
 	cbox_unit_state unit;

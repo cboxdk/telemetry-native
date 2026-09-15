@@ -35,6 +35,32 @@ work through the `begin()` context, which is the better place to do it.
 | `cbox_telemetry.breadcrumbs.size` | `256` | 16 – 4096 | SYSTEM | Ring entries, 64 bytes each. Rounded up to a power of two. |
 | `cbox_telemetry.crash.enabled` | `1` | | SYSTEM | Install the fatal-signal handlers. The kill switch if they are ever suspected. |
 | `cbox_telemetry.crash.dir` | `/tmp/cbox-telemetry` | | SYSTEM | Where records are written. Created `0700`; refused if it exists and is not a directory owned by this user. |
+| `cbox_telemetry.auto` | `0` | | SYSTEM | Open a unit of work automatically at the start of every request. See below. |
+| `cbox_telemetry.auto_max_ms` | `60000` | 1000 – 3600000 | SYSTEM | How long an automatic unit may sample before the profiler stops itself. Only applies to automatic units. |
+
+## Automatic instrumentation
+
+With `cbox_telemetry.auto=1` a unit of work opens at RINIT, before any PHP runs.
+Two things follow from that.
+
+**You can collect without ever calling `begin()`.** `cbox_telemetry_finish(0)`
+ends whichever unit is open, which is all a terminate hook has to work with.
+
+**Measurement starts at the first instruction.** A `begin()` in framework
+middleware cannot see autoloading, service providers, config or route caching —
+on a cold request that is often most of the time. An automatic unit does. The
+first `begin()` then *adopts* the running unit rather than restarting it: the
+bootstrap samples are kept and the context passed in labels them.
+
+It is off by default because it is wrong for long-running processes. In a queue
+worker or an Octane server, RINIT fires once for the whole process, so an
+automatic unit would cover hours and mean nothing. Those should call
+`begin()`/`finish()` per job, with `auto=0`.
+
+`auto_max_ms` is the safety valve for when that advice is not followed: an
+automatic unit that outlives it stops sampling, keeps what it has, and sets
+`counters['profiler.capped']`. It bounds the damage; it is not a substitute for
+turning `auto` off where it does not belong.
 
 ## Per-unit overrides
 

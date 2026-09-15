@@ -3,6 +3,7 @@ cbox_telemetry: draining with nothing to drain is not an error
 --EXTENSIONS--
 cbox_telemetry
 --INI--
+cbox_telemetry.crash.enabled=1
 cbox_telemetry.crash.dir=/tmp/cbox-telemetry-drain-empty
 --FILE--
 <?php

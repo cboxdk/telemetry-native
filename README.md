@@ -37,6 +37,18 @@ $handle = cbox_telemetry_begin([
 $result = cbox_telemetry_finish($handle, includeProfile: $durationMs >= 500);
 ```
 
+Or let it instrument itself and collect once at the end — which also means the
+profile covers the framework booting, not just the part after your middleware
+runs:
+
+```ini
+cbox_telemetry.auto = 1
+```
+
+```php
+$result = cbox_telemetry_finish(0, includeProfile: $durationMs >= 500);
+```
+
 `$result` carries the unit's duration, per-type operation aggregates, runtime
 counters, and — only when you ask for it — an aggregated CPU profile:
 

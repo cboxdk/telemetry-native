@@ -6,6 +6,41 @@ description: "The integration pattern for a request or job, including the orderi
 
 # Bracketing a unit of work
 
+## Which mode
+
+| | |
+|---|---|
+| **Per-request SAPIs** — FPM, mod_php, CLI scripts | `cbox_telemetry.auto=1`, collect in a terminate hook. Measurement covers the bootstrap. |
+| **Long-running** — queue workers, Octane, Swoole | `auto=0`, explicit `begin()`/`finish()` per job or request. |
+
+The split is not a preference. RINIT fires once per request under FPM and once
+per *process* in a worker, so an automatic unit in a worker would cover the
+whole process lifetime and describe nothing.
+
+## Automatic, collected from terminate
+
+```php
+// Nothing at the start of the request. A unit is already open.
+
+// …later, in a terminate hook:
+$result = cbox_telemetry_finish(0, includeProfile: $durationMs >= 500);
+```
+
+Give it trace context when the framework has it, and the running unit is adopted
+rather than restarted:
+
+```php
+$handle = cbox_telemetry_begin([
+    'trace_id' => $span->traceId,
+    'span_id'  => $span->spanId,
+    'unit'     => 'http',
+    'sampled'  => $span->sampled,
+]);
+```
+
+That returns the automatic unit's own handle. Everything sampled before the call
+— the part a middleware could never see — is still in the profile.
+
 ## The pattern
 
 ```php

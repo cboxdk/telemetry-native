@@ -38,7 +38,13 @@ bool cbox_profiler_ready(void);
 void cbox_profiler_install(void);
 void cbox_profiler_uninstall(void);
 
-int  cbox_profiler_start(uint64_t period_ns, uint32_t max_depth);
+/*
+ * `max_duration_ns` is a safety valve for units nobody closes — an automatic
+ * unit in a queue worker would otherwise sample for the life of the process.
+ * Zero means no limit. When it trips, sampling stops and the samples taken so
+ * far are kept; the unit itself stays open.
+ */
+int  cbox_profiler_start(uint64_t period_ns, uint32_t max_depth, uint64_t max_duration_ns);
 void cbox_profiler_stop(void);
 void cbox_profiler_reset(void);
 bool cbox_profiler_running(void);
@@ -46,6 +52,7 @@ bool cbox_profiler_running(void);
 uint64_t cbox_profiler_period_ns(void);
 uint64_t cbox_profiler_sample_count(void);
 uint64_t cbox_profiler_dropped(void);
+bool     cbox_profiler_capped(void);
 size_t   cbox_profiler_arena_peak(void);
 
 /* Read-only views for materialising the profile into PHP. */

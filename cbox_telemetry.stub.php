@@ -19,15 +19,27 @@ function cbox_telemetry_status(): array {}
  * or declined to start (which callers should treat as "no native telemetry",
  * never as an error).
  *
+ * With cbox_telemetry.auto enabled, a unit is already open by the time any PHP
+ * runs, and this call *adopts* it: the samples taken during bootstrap are kept,
+ * and the context given here labels them. The returned handle is the automatic
+ * unit's own.
+ *
  * Recognised context keys: trace_id (32 hex), span_id (16 hex),
  * unit ("http"|"queue"|"command"|"schedule"), sampled (bool),
  * profile (bool), period_us (int), max_depth (int).
+ *
+ * On adoption, period_us and max_depth only apply if profiling was not already
+ * running — re-arming the timer would discard the samples worth adopting.
+ * Passing sampled or profile as false discards the profile instead.
  */
 function cbox_telemetry_begin(array $context = []): int {}
 
 /**
  * End the unit and return its aggregates. Returns an empty array when the
  * handle is not the active one.
+ *
+ * Pass 0 to end whichever unit is open. That is how automatic instrumentation
+ * is collected: a terminate hook never saw a begin() and has no handle.
  *
  * The profile is only materialised into PHP when $includeProfile is true —
  * a fast request resets the native state and allocates nothing.

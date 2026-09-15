@@ -21,6 +21,11 @@ begin(context)  →  handle
 finish(handle, includeProfile)  →  aggregates, and a profile only if asked
 ```
 
+With `cbox_telemetry.auto` enabled, the unit opens at RINIT instead of waiting
+to be asked, and the first `begin()` adopts it: same handle, same samples, now
+with a label and a trace id. That is the only way to profile the framework
+booting, which happens long before any middleware can call anything.
+
 Units do not nest. A second `begin()` abandons the first rather than stacking —
 a caller that leaks a handle degrades to "last one wins" instead of leaving a
 timer armed forever. `finish()` resets everything immediately rather than at the

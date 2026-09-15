@@ -8,6 +8,7 @@ if (!function_exists('proc_open')) die('skip proc_open disabled');
 if (stripos(PHP_OS_FAMILY, 'win') === 0) die('skip POSIX only');
 ?>
 --INI--
+cbox_telemetry.crash.enabled=1
 cbox_telemetry.crash.dir=/tmp/cbox-telemetry-test-abort
 --FILE--
 <?php
@@ -27,6 +28,7 @@ $command = [
     '-n',
     '-d', 'extension_dir=' . ini_get('extension_dir'),
     '-d', 'extension=cbox_telemetry.so',
+    '-d', 'cbox_telemetry.crash.enabled=1',
     '-d', 'cbox_telemetry.crash.dir=' . $dir,
     __DIR__ . '/crash/abort_child.php',
 ];

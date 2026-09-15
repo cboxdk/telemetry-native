@@ -34,6 +34,16 @@ typedef struct _cbox_unit_state {
 	bool     sampled;
 	bool     profiling;
 	bool     has_trace;
+
+	/*
+	 * An automatic unit was opened by the engine at RINIT rather than by a
+	 * caller, so that measurement starts at the first instruction of the
+	 * request instead of whenever the framework gets around to asking. The
+	 * first begin() adopts it — keeping everything sampled so far — rather
+	 * than throwing the bootstrap away and starting again.
+	 */
+	bool     automatic;
+	bool     adopted;
 	uint64_t start_ns;
 	uint8_t  trace_id[CBOX_TRACE_ID_BYTES];
 	uint8_t  span_id[CBOX_SPAN_ID_BYTES];
