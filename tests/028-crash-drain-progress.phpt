@@ -6,7 +6,6 @@ cbox_telemetry
 <?php
 if (!function_exists('proc_open')) die('skip proc_open disabled');
 if (stripos(PHP_OS_FAMILY, 'win') === 0) die('skip POSIX only');
-if (!function_exists('posix_geteuid')) die('skip ext/posix required');
 ?>
 --INI--
 cbox_telemetry.crash.enabled=1
@@ -14,8 +13,8 @@ cbox_telemetry.crash.dir=/tmp/cbox-telemetry-test-progress
 --FILE--
 <?php
 $dir  = '/tmp/cbox-telemetry-test-progress';
-$mine = $dir . '/' . posix_geteuid();
-$self = $mine . '/crash-' . getmypid() . '.bin';
+$self = cbox_telemetry_status()['crash_path'];
+$mine = dirname($self);
 
 foreach (glob($dir . '/*/*') ?: [] as $stale) {
     if ($stale !== $self) {

@@ -14,7 +14,7 @@ cbox_telemetry.crash.dir=/tmp/cbox-telemetry-test-multi
 --FILE--
 <?php
 $dir = '/tmp/cbox-telemetry-test-multi';
-$mine = $dir . '/' . posix_geteuid() . '/crash-' . getmypid() . '.bin';
+$mine = cbox_telemetry_status()['crash_path'];
 
 /*
  * Clear leftovers, but not our own sink: it is already open, and unlinking it
