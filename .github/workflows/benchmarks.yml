@@ -1,0 +1,44 @@
+name: benchmarks
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly, so overhead regressions surface without gating every PR on a
+    # measurement whose noise floor is wider than the thing being measured.
+    - cron: '0 4 * * 1'
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  overhead:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          coverage: none
+          tools: none
+
+      - name: Build
+        run: |
+          phpize
+          ./configure --enable-cbox-telemetry
+          make -j4
+
+      - name: Install Excimer for comparison
+        continue-on-error: true
+        run: sudo pecl install excimer && echo "extension=excimer.so" | sudo tee -a "$(php -i | grep '^Loaded Configuration File' | cut -d' ' -f5)"
+
+      - name: Measure
+        run: php benchmarks/run.php modules/cbox_telemetry.so 21 1000 | tee benchmark-results.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark-results.txt

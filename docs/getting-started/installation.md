@@ -1,0 +1,81 @@
+---
+title: "Installation"
+weight: 11
+description: "Installing via PIE or from source, and verifying the build you got."
+---
+
+# Installation
+
+## PIE
+
+```bash
+pie install cboxdk/telemetry-native
+```
+
+PIE compiles from source on Linux and macOS. It will offer to install the build
+toolchain if it is missing.
+
+## From source
+
+```bash
+git clone https://github.com/cboxdk/telemetry-native
+cd telemetry-native
+phpize
+./configure --enable-cbox-telemetry
+make -j8
+make test
+sudo make install
+```
+
+Then add `extension=cbox_telemetry.so` to your `php.ini`.
+
+On macOS, build against Homebrew PHP — Herd ships no development headers:
+
+```bash
+./configure --enable-cbox-telemetry --with-php-config=/opt/homebrew/bin/php-config
+```
+
+## Verify
+
+```bash
+php -r 'print_r(cbox_telemetry_status());'
+```
+
+```php
+[version] => 0.1.0-dev
+[enabled] => 1
+[timer_backend] => posix-thread-cputime
+[timer_cpu_time] => 1
+[timer_signal] => 38
+[hooks] => pdo,redis,curl
+[crash_recorder] => armed
+[crash_path] => /tmp/cbox-telemetry/crashes.bin
+```
+
+What to look for:
+
+- **`timer_backend`** — `posix-thread-cputime` is the real one. `thread-walltime`
+  means you are on the development fallback and samples measure wall time.
+- **`timer_signal`** — never 27. That is `SIGPROF`, which belongs to PHP's
+  `max_execution_time`, and the extension deliberately stays off it.
+- **`crash_recorder`** — `armed`, or a reason it is not: `unavailable: directory`
+  (the crash directory is missing, not a directory, or not owned by this user),
+  `unavailable: sink`, `unavailable: handler`, or `off` if you disabled it.
+- **`hooks`** — which operation hooks are enabled, not which ones found a target.
+  `redis` appearing here when `ext-redis` is not installed is expected; the hook
+  simply has nothing to attach to.
+
+## Troubleshooting
+
+**The extension does not appear in `php -m` and PHP exits without a message.**
+On macOS a `.so` with an unresolved symbol is killed by the loader with no
+diagnostic. Almost always a stale object file: `make clean && make`.
+
+**`Maximum execution time of 0 seconds exceeded` on every profiled script.**
+You are running a build old enough to have used `SIGPROF`. Update; nothing
+current does.
+
+**`crash_recorder` says `unavailable: directory`.** Something already owns
+`cbox_telemetry.crash.dir` — commonly another user's `/tmp/cbox-telemetry` from a
+different account. Point `cbox_telemetry.crash.dir` somewhere this user owns.
+The recorder refuses rather than writing into a directory it cannot vouch for.

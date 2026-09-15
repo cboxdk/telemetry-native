@@ -1,0 +1,38 @@
+{
+    "name": "cboxdk/telemetry-native",
+    "description": "Deep PHP runtime telemetry for the Cbox stack: statistical CPU profiling, native operation timing, runtime counters and crash breadcrumbs. Optional companion to cboxdk/laravel-telemetry.",
+    "type": "php-ext",
+    "keywords": [
+        "cbox",
+        "telemetry",
+        "observability",
+        "profiler",
+        "profiling",
+        "extension"
+    ],
+    "homepage": "https://github.com/cboxdk/telemetry-native",
+    "license": "MIT",
+    "support": {
+        "issues": "https://github.com/cboxdk/telemetry-native/issues",
+        "source": "https://github.com/cboxdk/telemetry-native"
+    },
+    "authors": [
+        {
+            "name": "Sylvester Damgaard",
+            "email": "sn@cbox.dk",
+            "role": "Developer"
+        }
+    ],
+    "require": {
+        "php": "^8.3|^8.4|^8.5"
+    },
+    "php-ext": {
+        "extension-name": "cbox_telemetry",
+        "priority": 80,
+        "support-zts": false,
+        "support-nts": true,
+        "os-families-exclude": [
+            "windows"
+        ]
+    }
+}

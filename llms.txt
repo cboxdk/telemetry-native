@@ -1,0 +1,33 @@
+# cboxdk/telemetry-native
+
+An optional PHP extension (`cbox_telemetry`) that measures the PHP runtime:
+statistical CPU profiling, native operation timing, runtime counters and a
+signal-safe crash recorder. Companion to cboxdk/laravel-telemetry, which owns
+all semantics, sampling policy, redaction and export. No Laravel knowledge, no
+networking, no policy in the C.
+
+PHP 8.3–8.5, NTS only. Linux (glibc and musl) is the production target; macOS is
+development-only and samples wall clock rather than CPU time. MIT licensed,
+clean-room — nothing taken from Excimer (GPL-2.0).
+
+## Documentation
+
+- [docs/index.md](docs/index.md): overview, the three-layer mental model, section TOC.
+- [docs/quickstart.md](docs/quickstart.md): install, read a first profile, tail retention in one page.
+- [docs/requirements.md](docs/requirements.md): PHP versions, platform support matrix, build tooling.
+- [docs/getting-started/installation.md](docs/getting-started/installation.md): PIE and source builds, what to verify, troubleshooting.
+- [docs/getting-started/testing.md](docs/getting-started/testing.md): testing code that must work with and without the extension.
+- [docs/core-concepts/architecture.md](docs/core-concepts/architecture.md): unit of work, the five functions, the rules the C holds itself to.
+- [docs/core-concepts/profiler.md](docs/core-concepts/profiler.md): the safe-point stack walk, frame interning, trie aggregation, reading the output.
+- [docs/core-concepts/operations.md](docs/core-concepts/operations.md): which calls are hooked, why aggregates rather than records, known limits.
+- [docs/core-concepts/crashes.md](docs/core-concepts/crashes.md): breadcrumbs, record contents, signal safety, draining.
+- [docs/configuration/reference.md](docs/configuration/reference.md): every INI setting with defaults, bounds and mutability.
+- [docs/cookbook/unit-of-work.md](docs/cookbook/unit-of-work.md): the integration pattern and the two ordering mistakes to avoid.
+- [docs/security/_index.md](docs/security/_index.md): what is collected, what is refused, crash sink protection.
+- [docs/decisions/0001-operation-hook-mechanism.md](docs/decisions/0001-operation-hook-mechanism.md): why handler swaps beat the Zend Observer, with benchmark numbers.
+- [docs/decisions/0002-timer-backends.md](docs/decisions/0002-timer-backends.md): why not SIGPROF, and why macOS uses a timer thread.
+
+## Working on it
+
+- [AGENTS.md](AGENTS.md): build commands, architecture map, the invariants that must not break.
+- [CONTRIBUTING.md](CONTRIBUTING.md): the gate a change has to pass.
