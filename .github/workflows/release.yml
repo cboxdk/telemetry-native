@@ -17,26 +17,25 @@ jobs:
   # matrix here is the matrix of names it will look for — miss one and those
   # users silently fall back to compiling from source.
   binaries:
-    name: "${{ matrix.php }} · ${{ matrix.arch }} · ${{ matrix.libc }}"
-    runs-on: ${{ matrix.runner }}
+    name: "${{ matrix.php }} · ${{ matrix.target.arch }} · ${{ matrix.target.libc }}"
+    runs-on: ${{ matrix.target.runner }}
     timeout-minutes: 20
-    container: ${{ matrix.image }}
+    container: php:${{ matrix.php }}-${{ matrix.target.image_suffix }}
 
     strategy:
       fail-fast: false
       matrix:
         php: ['8.3', '8.4', '8.5']
-        include:
-          - { arch: x86_64, libc: glibc, runner: ubuntu-24.04,     image_suffix: 'cli' }
-          - { arch: arm64,  libc: glibc, runner: ubuntu-24.04-arm, image_suffix: 'cli' }
-          - { arch: x86_64, libc: musl,  runner: ubuntu-24.04,     image_suffix: 'cli-alpine' }
-          - { arch: arm64,  libc: musl,  runner: ubuntu-24.04-arm, image_suffix: 'cli-alpine' }
-        exclude: []
+        # A second real axis, not `include:` — include entries that share no key
+        # with the base matrix are merged into every combination in turn, so the
+        # last one silently wins and twelve jobs collapse into three.
+        target:
+          - { arch: x86_64, libc: glibc, runner: ubuntu-24.04,     image_suffix: cli }
+          - { arch: arm64,  libc: glibc, runner: ubuntu-24.04-arm, image_suffix: cli }
+          - { arch: x86_64, libc: musl,  runner: ubuntu-24.04,     image_suffix: cli-alpine }
+          - { arch: arm64,  libc: musl,  runner: ubuntu-24.04-arm, image_suffix: cli-alpine }
 
     steps:
-      - name: Resolve image
-        run: echo "IMAGE=php:${{ matrix.php }}-${{ matrix.image_suffix }}" >> "$GITHUB_ENV"
-
       - uses: actions/checkout@v4
 
       - name: Install build tools
@@ -75,7 +74,7 @@ jobs:
 
           # php_{name}-{version}_php{maj.min}-{arch}-{os}-{libc}-nts.tgz, lowercased.
           # Verified against php/pie's PrePackagedBinaryAssetName.
-          base="php_cbox_telemetry-${TAG}_php${{ matrix.php }}-${{ matrix.arch }}-linux-${{ matrix.libc }}-nts"
+          base="php_cbox_telemetry-${TAG}_php${{ matrix.php }}-${{ matrix.target.arch }}-linux-${{ matrix.target.libc }}-nts"
           base=$(echo "$base" | tr '[:upper:]' '[:lower:]')
           tar -czf "dist/${base}.tgz" -C staging cbox_telemetry.so
 
@@ -83,7 +82,7 @@ jobs:
           # name PIE asks for. Publish the bare-version spelling too, in case a
           # release is ever cut without the prefix — it costs one copy.
           if [ "${TAG#v}" != "$TAG" ]; then
-            bare=$(echo "php_cbox_telemetry-${TAG#v}_php${{ matrix.php }}-${{ matrix.arch }}-linux-${{ matrix.libc }}-nts" | tr '[:upper:]' '[:lower:]')
+            bare=$(echo "php_cbox_telemetry-${TAG#v}_php${{ matrix.php }}-${{ matrix.target.arch }}-linux-${{ matrix.target.libc }}-nts" | tr '[:upper:]' '[:lower:]')
             cp "dist/${base}.tgz" "dist/${bare}.tgz"
           fi
 
@@ -91,7 +90,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: binary-${{ matrix.php }}-${{ matrix.arch }}-${{ matrix.libc }}
+          name: binary-${{ matrix.php }}-${{ matrix.target.arch }}-${{ matrix.target.libc }}
           path: dist/*.tgz
           if-no-files-found: error
 
