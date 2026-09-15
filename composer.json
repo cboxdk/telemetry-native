@@ -34,5 +34,8 @@
         "os-families-exclude": [
             "windows"
         ]
+    },
+    "extra": {
+        "download-url-method": "pre-packaged-binary"
     }
 }
