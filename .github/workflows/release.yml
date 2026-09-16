@@ -143,6 +143,6 @@ jobs:
             gh release create "$TAG" \
               --repo "${{ github.repository }}" \
               --title "$TAG" \
-              --notes-file <(awk -v v="${TAG#v}" '/^## \[/{p = index($0,"["v"]")>0; if (p) next} p' CHANGELOG.md) \
+              --notes-file <(awk -v v="${TAG#v}" '/^## \[/{p = index($0,"["v"]")>0; if (p) next} /^\[[^]]+\]: /{p = 0} p' CHANGELOG.md) \
               artifacts/*.tgz artifacts/SHA256SUMS
           fi
